@@ -1,7 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { createSocket } from '../utils/socketClient';
-import { isSecureContext } from '../config/env';
-import { fetchIceServers, getDefaultIceServers } from '../services/webrtc.service';
+import io from 'socket.io-client';
 import { useAuth } from '../context/AuthContext';
 import { useTranslation } from 'react-i18next';
 import appointmentService from '../services/appointment.service';
@@ -38,11 +36,19 @@ import {
   Download,
   Languages,
   RotateCcw,
-  ShoppingBag,
+  Calendar
 } from 'lucide-react';
-import OrderMedicineModal from '../components/medicine/OrderMedicineModal';
+import ClinicalSnapshotModal from '../components/ClinicalSnapshotModal';
 
-const DEFAULT_ICE_SERVERS = getDefaultIceServers();
+const ICE_SERVERS = {
+  iceServers: [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:stun3.l.google.com:19302' },
+    { urls: 'stun:stun4.l.google.com:19302' },
+  ],
+};
 
 const PRESCRIPTION_PRESETS = [
   'Paracetamol 500mg (1-0-1) for 3 days after food. Adequate oral hydration.',
@@ -83,6 +89,10 @@ export const TeleconsultationRoom = ({ appointment, onLeaveRoom }) => {
   const [showTranslationSettings, setShowTranslationSettings] = useState(false);
   const [unreadChatCount, setUnreadChatCount] = useState(0);
   const [prescriptionAlert, setPrescriptionAlert] = useState(null);
+  const [showClinicalSnapshotModal, setShowClinicalSnapshotModal] = useState(false);
+  const [followUpPreset, setFollowUpPreset] = useState('7');
+  const [customFollowUpDate, setCustomFollowUpDate] = useState('');
+  const [followUpReason, setFollowUpReason] = useState('Evaluate response to treatment and symptom relief');
 
   // Live Audio Translation AI state
   const [isLiveTranslationActive, setIsLiveTranslationActive] = useState(true);
@@ -97,28 +107,6 @@ export const TeleconsultationRoom = ({ appointment, onLeaveRoom }) => {
   const targetLangRef = useRef(targetLang);
   const sourceLangRef = useRef(sourceLang);
   const speakVoiceoverRef = useRef(speakVoiceover);
-  const iceConfigRef = useRef(DEFAULT_ICE_SERVERS);
-
-  // Fetch short-lived, authenticated TURN credentials from backend on room entry
-  useEffect(() => {
-    let isSubscribed = true;
-    fetchIceServers().then((config) => {
-      if (isSubscribed && config) {
-        iceConfigRef.current = config;
-        if (peerConnectionRef.current && typeof peerConnectionRef.current.setConfiguration === 'function') {
-          try {
-            peerConnectionRef.current.setConfiguration(config);
-            console.log('[WebRTC] Updated active connection with authenticated ICE/TURN credentials');
-          } catch (err) {
-            console.debug('[WebRTC] setConfiguration notice:', err.message);
-          }
-        }
-      }
-    });
-    return () => {
-      isSubscribed = false;
-    };
-  }, [roomId]);
 
   useEffect(() => {
     targetLangRef.current = targetLang;
@@ -154,7 +142,6 @@ export const TeleconsultationRoom = ({ appointment, onLeaveRoom }) => {
   const [doctorPrescriptionInput, setDoctorPrescriptionInput] = useState(doctorNotes);
   const [prescriptionLastUpdated, setPrescriptionLastUpdated] = useState(null);
   const [rxSavedToast, setRxSavedToast] = useState(false);
-  const [showOrderModal, setShowOrderModal] = useState(false);
 
   // Call ended summary state
   const [callEnded, setCallEnded] = useState(false);
@@ -330,7 +317,7 @@ export const TeleconsultationRoom = ({ appointment, onLeaveRoom }) => {
         broadcastCaption(transcript, isFinal);
       },
       onError: (err) => {
-        if (err.error !== 'no-speech' && err.error !== 'aborted') {
+        if (err.error !== 'no-speech') {
           console.warn('[LiveTranslation] Recognizer notice:', err.message || err.error || err);
         }
         if (err.error === 'not-allowed' || err.error === 'service-not-allowed') {
@@ -437,7 +424,14 @@ export const TeleconsultationRoom = ({ appointment, onLeaveRoom }) => {
 
     // Helper: Initialize Peer Connection
     const createPeerConnection = (targetSocketId) => {
-      const pc = new RTCPeerConnection(iceConfigRef.current);
+      if (peerConnectionRef.current) {
+        try {
+          peerConnectionRef.current.close();
+        } catch (e) {
+          console.warn('[WebRTC] Error closing existing peer connection:', e);
+        }
+      }
+      const pc = new RTCPeerConnection(ICE_SERVERS);
       peerConnectionRef.current = pc;
 
       // Handle ICE Candidates
@@ -508,11 +502,6 @@ export const TeleconsultationRoom = ({ appointment, onLeaveRoom }) => {
 
     const initMediaAndSocket = async () => {
       // Step A: Capture local media or create high quality fallback video stream
-      if (!isSecureContext()) {
-        console.warn('[WebRTC] Running in non-secure context. Camera/microphone access requires HTTPS.');
-        setMediaError('Notice: Camera and microphone access requires HTTPS or localhost.');
-      }
-
       try {
         if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
           activeMediaStream = await navigator.mediaDevices.getUserMedia({
@@ -542,7 +531,10 @@ export const TeleconsultationRoom = ({ appointment, onLeaveRoom }) => {
       }
 
       // Step B: Connect Socket.IO
-      socket = createSocket({ reconnectionAttempts: 5 });
+      socket = io({
+        transports: ['websocket', 'polling'],
+        reconnectionAttempts: 5,
+      });
       socketRef.current = socket;
 
       socket.on('connect', () => {
@@ -588,6 +580,8 @@ export const TeleconsultationRoom = ({ appointment, onLeaveRoom }) => {
       });
 
       // Step D: When a new peer joins the room
+      // The newly joining peer receives 'existing-participants' and creates the offer.
+      // The peer already in the room receives 'user-joined' and waits for the incoming offer.
       socket.on('user-joined', ({ socketId, userName, userRole }) => {
         console.log(`[Socket] Peer joined: ${userName} (${userRole})`);
         setRemotePeerInfo({ socketId, userName, userRole });
@@ -619,12 +613,17 @@ export const TeleconsultationRoom = ({ appointment, onLeaveRoom }) => {
       // Step F: Receive WebRTC Answer
       socket.on('webrtc-answer', async ({ senderSocketId, sdp }) => {
         console.log('[WebRTC] Received answer from:', senderSocketId);
-        if (peerConnectionRef.current) {
-          try {
-            await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(sdp));
-            await flushIceCandidates(peerConnectionRef.current);
-          } catch (err) {
-            console.error('[WebRTC] Error setting remote description for answer:', err);
+        const pc = peerConnectionRef.current;
+        if (pc) {
+          if (pc.signalingState === 'have-local-offer') {
+            try {
+              await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+              await flushIceCandidates(pc);
+            } catch (err) {
+              console.error('[WebRTC] Error setting remote description for answer:', err);
+            }
+          } else {
+            console.warn(`[WebRTC] Skipping setRemoteDescription for answer because signalingState is '${pc.signalingState}' (expected 'have-local-offer')`);
           }
         }
       });
@@ -704,11 +703,10 @@ export const TeleconsultationRoom = ({ appointment, onLeaveRoom }) => {
         }
       });
 
-      // Step I-2: Receive Real-Time Video Frame from Peer
+      // Step I-2: Receive Real-Time Video Frame from Peer (fallback snapshot feed)
       socket.on('video-frame', ({ frameData }) => {
         if (frameData) {
           setRemoteVideoFrame(frameData);
-          setHasRemoteStream(true);
           setIsPeerConnected(true);
         }
       });
@@ -820,28 +818,21 @@ export const TeleconsultationRoom = ({ appointment, onLeaveRoom }) => {
                   parameters.encodings = [{}];
                 }
                 
-                const adaptation = clinicalQoSController.getMediaAdaptation(qosMetrics.state);
-                const targetBitrate = adaptation.targetBitrate;
-                const targetScale = adaptation.scaleResolutionDownBy;
-                const targetFramerate = adaptation.maxFramerate;
+                let targetBitrate = 1500000;
+                let targetScale = 1;
 
-                // Only call setParameters() when values actually differ to avoid unnecessary renegotiations
-                if (
-                  parameters.encodings[0].maxBitrate !== targetBitrate ||
-                  parameters.encodings[0].scaleResolutionDownBy !== targetScale ||
-                  parameters.encodings[0].maxFramerate !== targetFramerate
-                ) {
-                  parameters.encodings[0].maxBitrate = targetBitrate;
-                  parameters.encodings[0].scaleResolutionDownBy = targetScale;
-                  parameters.encodings[0].maxFramerate = targetFramerate;
-                  await videoSender.setParameters(parameters).catch(e => console.warn('Could not set video parameters', e));
+                if (qosMetrics.state === 'VERY_LOW') {
+                  targetBitrate = 50000;
+                  targetScale = 4;
+                } else if (qosMetrics.state === 'MEDIUM') {
+                  targetBitrate = 200000;
+                  targetScale = 2;
                 }
 
-                // Translation adaptation: switch to subtitles-only under VERY_LOW to prioritize audio bandwidth
-                if (qosMetrics.state === 'VERY_LOW' && speakVoiceover) {
-                  setSpeakVoiceover(false);
-                } else if (qosMetrics.state === 'GOOD' && !speakVoiceover) {
-                  setSpeakVoiceover(true);
+                if (parameters.encodings[0].maxBitrate !== targetBitrate || parameters.encodings[0].scaleResolutionDownBy !== targetScale) {
+                  parameters.encodings[0].maxBitrate = targetBitrate;
+                  parameters.encodings[0].scaleResolutionDownBy = targetScale;
+                  await videoSender.setParameters(parameters).catch(e => console.warn('Could not set video parameters', e));
                 }
               }
             }
@@ -987,11 +978,22 @@ export const TeleconsultationRoom = ({ appointment, onLeaveRoom }) => {
     // Persist to backend DB if appointment ID is present
     if (appointment?._id && token) {
       try {
-        await appointmentService.updateAppointmentStatus(token, appointment._id, {
+        const updatePayload = {
           notes: textToSync,
           prescriptionSummary: textToSync,
           chatHistory: chatMessages,
-        });
+        };
+        if (followUpPreset === '7') {
+          updatePayload.followUpDays = 7;
+          updatePayload.followUpReason = followUpReason;
+        } else if (followUpPreset === '30') {
+          updatePayload.followUpDays = 30;
+          updatePayload.followUpReason = followUpReason;
+        } else if (followUpPreset === 'custom' && customFollowUpDate) {
+          updatePayload.followUpDate = customFollowUpDate;
+          updatePayload.followUpReason = followUpReason;
+        }
+        await appointmentService.updateAppointmentStatus(token, appointment._id, updatePayload);
       } catch (err) {
         console.warn('Could not auto-save prescription to DB:', err.message);
       }
@@ -1021,12 +1023,23 @@ export const TeleconsultationRoom = ({ appointment, onLeaveRoom }) => {
     // Persist appointment completion and full chat history to backend
     if (appointment?._id && token) {
       try {
-        await appointmentService.updateAppointmentStatus(token, appointment._id, {
+        const completionPayload = {
           status: 'completed',
           notes: doctorNotes,
           prescriptionSummary: doctorNotes,
           chatHistory: chatMessages,
-        });
+        };
+        if (followUpPreset === '7') {
+          completionPayload.followUpDays = 7;
+          completionPayload.followUpReason = followUpReason;
+        } else if (followUpPreset === '30') {
+          completionPayload.followUpDays = 30;
+          completionPayload.followUpReason = followUpReason;
+        } else if (followUpPreset === 'custom' && customFollowUpDate) {
+          completionPayload.followUpDate = customFollowUpDate;
+          completionPayload.followUpReason = followUpReason;
+        }
+        await appointmentService.updateAppointmentStatus(token, appointment._id, completionPayload);
       } catch (err) {
         console.warn('Could not update status to completed:', err.message);
       }
@@ -1157,36 +1170,9 @@ export const TeleconsultationRoom = ({ appointment, onLeaveRoom }) => {
                   <span style={styles.rxVerifiedBadge}>✓ Digital e-Prescription</span>
                 </div>
                 <p style={styles.summaryNotes}>{doctorNotes || 'No specific prescription noted.'}</p>
-                {doctorNotes && (
-                  <button
-                    type="button"
-                    style={{
-                      marginTop: '8px',
-                      padding: '8px 14px',
-                      backgroundColor: '#059669',
-                      color: '#FFFFFF',
-                      border: 'none',
-                      borderRadius: '8px',
-                      fontSize: '0.8rem',
-                      fontWeight: '800',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      gap: '6px',
-                      cursor: 'pointer',
-                      width: '100%',
-                      boxShadow: '0 2px 8px rgba(5, 150, 105, 0.25)',
-                    }}
-                    onClick={() => setShowOrderModal(true)}
-                  >
-                    <ShoppingBag size={15} color="#FFFFFF" strokeWidth={2.4} />
-                    <span>Order Prescribed Medicines from Nearby Shop</span>
-                  </button>
-                )}
               </div>
             )}
           </div>
-
 
           <button type="button" onClick={onLeaveRoom} style={styles.returnBtn}>
             <span>{t('teleconsult.returnHome')}</span>
@@ -1393,40 +1379,36 @@ export const TeleconsultationRoom = ({ appointment, onLeaveRoom }) => {
 
           {/* Main Remote Video Container */}
           <div style={styles.remoteVideoContainer}>
-            {/* Live Synchronized Remote Video Frame (Guarantees 100% video visibility across all tabs & networks) */}
             {networkQuality === 'OFFLINE' ? (
               <div style={{...styles.remoteVideoElement, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', backgroundColor: '#000'}}>
                  <WifiOff size={48} color="#EF4444" />
                  <h2 style={{color: 'white', marginTop: '16px'}}>Connection Lost</h2>
                  <p style={{color: '#94A3B8'}}>Attempting to reconnect...</p>
               </div>
-            ) : networkQuality === 'VERY_LOW' && !remoteVideoFrame ? (
+            ) : networkQuality === 'VERY_LOW' && !remoteVideoFrame && !hasRemoteStream ? (
               <div style={{...styles.remoteVideoElement, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', backgroundColor: '#000'}}>
                  <Wifi size={48} color="#FBBF24" />
                  <h2 style={{color: 'white', marginTop: '16px'}}>Poor Network</h2>
                  <p style={{color: '#94A3B8'}}>Video degraded to preserve audio and clinical chat</p>
                  <audio ref={remoteVideoRef} autoPlay />
               </div>
+            ) : hasRemoteStream && !isRemoteVideoMuted ? (
+              /* 1. Primary: Live WebRTC Video Stream (high performance, 30fps + voice) */
+              <video
+                ref={remoteVideoRef}
+                autoPlay
+                playsInline
+                onLoadedMetadata={(e) => e.target.play().catch(() => {})}
+                style={styles.remoteVideoElement}
+              />
             ) : remoteVideoFrame && !isRemoteVideoMuted ? (
+              /* 2. Fallback: Socket-based frame broadcast (guarantees video visibility even before WebRTC connects) */
               <img
                 src={remoteVideoFrame}
                 alt="Remote Live Video Stream"
                 style={styles.remoteVideoElement}
               />
-            ) : (
-              /* Live WebRTC Remote Video Stream Element */
-              <video
-                ref={remoteVideoRef}
-                autoPlay
-                playsInline
-                muted
-                onLoadedMetadata={(e) => e.target.play().catch(() => {})}
-                style={{
-                  ...styles.remoteVideoElement,
-                  display: hasRemoteStream && !isRemoteVideoMuted ? 'block' : 'none',
-                }}
-              />
-            )}
+            ) : null}
 
             {/* Peer Waiting / Audio Only / Cam Off Backdrop */}
             {(!hasRemoteStream || isRemoteVideoMuted) && !remoteVideoFrame && (
@@ -1673,6 +1655,91 @@ export const TeleconsultationRoom = ({ appointment, onLeaveRoom }) => {
                         ))}
                       </div>
 
+                      {/* Doctor Follow-Up Scheduler Options */}
+                      <div style={{ marginTop: '12px', marginBottom: '12px', padding: '10px 12px', backgroundColor: '#F8FAFC', borderRadius: '10px', border: '1px solid #E2E8F0' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '6px' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
+                            <Calendar size={14} color="#6D28D9" />
+                            <span style={{ fontSize: '0.76rem', fontWeight: '800', color: '#1E293B' }}>Follow-Up Schedule:</span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setShowClinicalSnapshotModal(true)}
+                            style={{
+                              border: 'none',
+                              backgroundColor: 'transparent',
+                              color: '#0284C7',
+                              fontSize: '0.72rem',
+                              fontWeight: '700',
+                              cursor: 'pointer',
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: '3px',
+                            }}
+                          >
+                            <Sparkles size={12} color="#0284C7" />
+                            <span>View Snapshot</span>
+                          </button>
+                        </div>
+                        <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', marginBottom: '8px' }}>
+                          {[
+                            { id: 'none', label: 'None' },
+                            { id: '7', label: '7 Days' },
+                            { id: '30', label: '30 Days' },
+                            { id: 'custom', label: 'Custom' },
+                          ].map((f) => (
+                            <button
+                              key={f.id}
+                              type="button"
+                              onClick={() => setFollowUpPreset(f.id)}
+                              style={{
+                                padding: '3px 8px',
+                                fontSize: '0.72rem',
+                                fontWeight: '700',
+                                borderRadius: '6px',
+                                border: '1px solid',
+                                borderColor: followUpPreset === f.id ? '#6D28D9' : '#CBD5E1',
+                                backgroundColor: followUpPreset === f.id ? '#EDE9FE' : '#FFFFFF',
+                                color: followUpPreset === f.id ? '#6D28D9' : '#64748B',
+                                cursor: 'pointer',
+                              }}
+                            >
+                              {f.label}
+                            </button>
+                          ))}
+                        </div>
+                        {followUpPreset === 'custom' && (
+                          <input
+                            type="date"
+                            value={customFollowUpDate}
+                            onChange={(e) => setCustomFollowUpDate(e.target.value)}
+                            style={{
+                              width: '100%',
+                              padding: '5px 8px',
+                              fontSize: '0.76rem',
+                              borderRadius: '6px',
+                              border: '1px solid #CBD5E1',
+                              marginBottom: '6px',
+                            }}
+                          />
+                        )}
+                        {followUpPreset !== 'none' && (
+                          <input
+                            type="text"
+                            placeholder="Reason for follow-up (e.g. check symptom resolution)..."
+                            value={followUpReason}
+                            onChange={(e) => setFollowUpReason(e.target.value)}
+                            style={{
+                              width: '100%',
+                              padding: '5px 8px',
+                              fontSize: '0.76rem',
+                              borderRadius: '6px',
+                              border: '1px solid #CBD5E1',
+                            }}
+                          />
+                        )}
+                      </div>
+
                       <button
                         type="button"
                         onClick={() => handleSyncPrescription(doctorPrescriptionInput)}
@@ -1698,38 +1765,11 @@ export const TeleconsultationRoom = ({ appointment, onLeaveRoom }) => {
                         </p>
                       </div>
 
-                      {doctorNotes && (
-                        <button
-                          type="button"
-                          style={{
-                            margin: '8px 0',
-                            padding: '8px 12px',
-                            backgroundColor: '#059669',
-                            color: '#FFFFFF',
-                            border: 'none',
-                            borderRadius: '8px',
-                            fontSize: '0.78rem',
-                            fontWeight: '800',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            gap: '6px',
-                            cursor: 'pointer',
-                            boxShadow: '0 2px 6px rgba(5, 150, 105, 0.2)',
-                          }}
-                          onClick={() => setShowOrderModal(true)}
-                        >
-                          <ShoppingBag size={14} color="#FFFFFF" strokeWidth={2.4} />
-                          <span>Order Medicines Now</span>
-                        </button>
-                      )}
-
                       <p style={styles.rxDisclaimer}>
                         Official encrypted tele-prescription generated by Primary Health Centre Tele-Consult Network.
                       </p>
                     </div>
                   )}
-
                 </div>
               </div>
             )}
@@ -1925,6 +1965,23 @@ export const TeleconsultationRoom = ({ appointment, onLeaveRoom }) => {
               )}
             </button>
 
+            {/* Clinical Snapshot Toggle (Doctor Only) */}
+            {isDoctor && (
+              <button
+                type="button"
+                onClick={() => setShowClinicalSnapshotModal(true)}
+                style={{
+                  ...styles.controlCircleBtn,
+                  backgroundColor: showClinicalSnapshotModal ? '#0284C7' : '#E0F2FE',
+                  color: showClinicalSnapshotModal ? '#FFFFFF' : '#0284C7',
+                }}
+                title="Patient Clinical Snapshot & Timeline"
+                aria-label="Toggle Clinical Snapshot"
+              >
+                <FileText size={20} strokeWidth={2.4} />
+              </button>
+            )}
+
             {/* End Call Button (Synchronously terminates for both parties) */}
             <button
               type="button"
@@ -1939,24 +1996,17 @@ export const TeleconsultationRoom = ({ appointment, onLeaveRoom }) => {
         </div>
       )}
 
-      {/* Prescription Order Modal for In-Call / Post-Call Patient Ordering */}
-      {showOrderModal && (
-        <OrderMedicineModal
-          isOpen={showOrderModal}
-          prescription={{
-            title: `e-Prescription: Consultation with ${peerName || appointment?.doctorName || 'Doctor'}`,
-            doctorName: peerName || appointment?.doctorName || 'Consulting Physician',
-            textContent: doctorNotes,
-            notes: doctorNotes,
-          }}
-          onClose={() => setShowOrderModal(false)}
-          onOrderSuccess={() => setShowOrderModal(false)}
+      {/* Doctor Clinical Snapshot & Unified Timeline Modal */}
+      {showClinicalSnapshotModal && (
+        <ClinicalSnapshotModal
+          patientId={appointment?.patientId?._id || appointment?.patientId}
+          appointmentId={appointment?._id || appointment?.id}
+          onClose={() => setShowClinicalSnapshotModal(false)}
         />
       )}
     </div>
   );
 };
-
 
 const styles = {
   roomContainer: {

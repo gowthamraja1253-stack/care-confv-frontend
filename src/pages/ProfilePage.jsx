@@ -38,13 +38,22 @@ export const ProfilePage = () => {
 
   // Patient fields
   const [age, setAge] = useState(35);
+  const [dob, setDob] = useState('');
   const [gender, setGender] = useState('Male');
+  const [bloodGroup, setBloodGroup] = useState('O+');
+  const [allergiesText, setAllergiesText] = useState('');
   const [chronicFlags, setChronicFlags] = useState([]);
+  const [surgeriesText, setSurgeriesText] = useState('');
+  const [currentMedicationsText, setCurrentMedicationsText] = useState('');
+  const [importantNotes, setImportantNotes] = useState('');
 
   // Emergency Contact fields
   const [emergencyContactName, setEmergencyContactName] = useState('Ramesh Kumar');
   const [emergencyContactPhone, setEmergencyContactPhone] = useState('+91 98765 43210');
   const [emergencyContactRelation, setEmergencyContactRelation] = useState('Brother');
+  const [emergencyContact2Name, setEmergencyContact2Name] = useState('');
+  const [emergencyContact2Phone, setEmergencyContact2Phone] = useState('');
+  const [emergencyContact2Relation, setEmergencyContact2Relation] = useState('');
 
   // Doctor fields
   const [specialization, setSpecialization] = useState('');
@@ -94,11 +103,29 @@ export const ProfilePage = () => {
       setVillage(user.village || '');
       setPreferredLanguage(user.preferredLanguage || currentLangName);
       setAge(user.age !== undefined ? user.age : 35);
+      setDob(user.dob || '');
       setGender(user.gender || 'Male');
-      setChronicFlags(user.chronicFlags || []);
-      setEmergencyContactName(user.emergencyContact?.name || 'Ramesh Kumar');
-      setEmergencyContactPhone(user.emergencyContact?.phone || '+91 98765 43210');
-      setEmergencyContactRelation(user.emergencyContact?.relation || 'Brother');
+      setBloodGroup(user.bloodGroup || 'O+');
+      setAllergiesText(Array.isArray(user.allergies) ? user.allergies.join(', ') : '');
+      setChronicFlags(user.chronicFlags || user.chronicConditions || []);
+      setSurgeriesText(Array.isArray(user.surgeries) ? user.surgeries.join(', ') : '');
+      setCurrentMedicationsText(Array.isArray(user.currentMedications) ? user.currentMedications.join(', ') : '');
+      setImportantNotes(user.importantNotes || '');
+
+      if (Array.isArray(user.emergencyContacts) && user.emergencyContacts.length > 0) {
+        setEmergencyContactName(user.emergencyContacts[0].name || '');
+        setEmergencyContactPhone(user.emergencyContacts[0].phone || '');
+        setEmergencyContactRelation(user.emergencyContacts[0].relationship || 'Family');
+        if (user.emergencyContacts.length > 1) {
+          setEmergencyContact2Name(user.emergencyContacts[1].name || '');
+          setEmergencyContact2Phone(user.emergencyContacts[1].phone || '');
+          setEmergencyContact2Relation(user.emergencyContacts[1].relationship || '');
+        }
+      } else {
+        setEmergencyContactName(user.emergencyContact?.name || 'Ramesh Kumar');
+        setEmergencyContactPhone(user.emergencyContact?.phone || '+91 98765 43210');
+        setEmergencyContactRelation(user.emergencyContact?.relation || 'Brother');
+      }
       setSpecialization(user.specialization || 'General Physician');
       setLicenseId(user.licenseId || 'MCI-2021-08492');
       setAvailability(user.availability || ['Mon - Fri: 09:00 AM - 01:00 PM', 'Mon - Fri: 04:00 PM - 07:00 PM']);
@@ -167,8 +194,33 @@ export const ProfilePage = () => {
 
     if (user.role === 'patient') {
       updatePayload.age = Number(age);
+      updatePayload.dob = dob;
       updatePayload.gender = gender;
+      updatePayload.bloodGroup = bloodGroup;
+      updatePayload.allergies = allergiesText ? allergiesText.split(',').map((s) => s.trim()).filter(Boolean) : [];
       updatePayload.chronicFlags = chronicFlags;
+      updatePayload.chronicConditions = chronicFlags;
+      updatePayload.surgeries = surgeriesText ? surgeriesText.split(',').map((s) => s.trim()).filter(Boolean) : [];
+      updatePayload.currentMedications = currentMedicationsText ? currentMedicationsText.split(',').map((s) => s.trim()).filter(Boolean) : [];
+      updatePayload.importantNotes = importantNotes;
+      updatePayload.emergencyContacts = [
+        {
+          name: emergencyContactName || 'Ramesh Kumar',
+          relationship: emergencyContactRelation || 'Brother',
+          phone: emergencyContactPhone || '+91 98765 43210',
+          priority: 1,
+        },
+        ...(emergencyContact2Name
+          ? [
+              {
+                name: emergencyContact2Name,
+                relationship: emergencyContact2Relation || 'Family',
+                phone: emergencyContact2Phone,
+                priority: 2,
+              },
+            ]
+          : []),
+      ];
       updatePayload.emergencyContact = {
         name: emergencyContactName,
         phone: emergencyContactPhone,
@@ -370,6 +422,22 @@ export const ProfilePage = () => {
               </div>
 
               <div style={styles.field}>
+                <label style={styles.label}>Date of Birth (DOB)</label>
+                {isEditing ? (
+                  <input
+                    type="date"
+                    style={styles.input}
+                    value={dob}
+                    onChange={(e) => setDob(e.target.value)}
+                  />
+                ) : (
+                  <p style={styles.valueText}>{dob || 'Not specified'}</p>
+                )}
+              </div>
+            </div>
+
+            <div style={styles.twoColGrid}>
+              <div style={styles.field}>
                 <label style={styles.label}>{t('profile.gender')}</label>
                 {isEditing ? (
                   <select
@@ -386,6 +454,45 @@ export const ProfilePage = () => {
                   <p style={styles.valueText}>{gender}</p>
                 )}
               </div>
+
+              <div style={styles.field}>
+                <label style={styles.label}>Blood Group</label>
+                {isEditing ? (
+                  <select
+                    style={styles.select}
+                    value={bloodGroup}
+                    onChange={(e) => setBloodGroup(e.target.value)}
+                  >
+                    <option value="A+">A+</option>
+                    <option value="A-">A-</option>
+                    <option value="B+">B+</option>
+                    <option value="B-">B-</option>
+                    <option value="AB+">AB+</option>
+                    <option value="AB-">AB-</option>
+                    <option value="O+">O+</option>
+                    <option value="O-">O-</option>
+                    <option value="Unknown">Unknown</option>
+                  </select>
+                ) : (
+                  <p style={styles.valueText}>{bloodGroup || 'Unknown'}</p>
+                )}
+              </div>
+            </div>
+
+            {/* Allergies */}
+            <div style={styles.field}>
+              <label style={styles.label}>Allergies</label>
+              {isEditing ? (
+                <input
+                  type="text"
+                  style={styles.input}
+                  placeholder="e.g. Penicillin, Peanuts, Sulfa drugs"
+                  value={allergiesText}
+                  onChange={(e) => setAllergiesText(e.target.value)}
+                />
+              ) : (
+                <p style={styles.valueText}>{allergiesText || 'None recorded'}</p>
+              )}
             </div>
 
             {/* Chronic Conditions Tags */}
@@ -427,6 +534,53 @@ export const ProfilePage = () => {
                 </div>
               )}
             </div>
+
+            {/* Surgeries / Medical History */}
+            <div style={styles.field}>
+              <label style={styles.label}>Previous Surgeries / Major Medical History</label>
+              {isEditing ? (
+                <input
+                  type="text"
+                  style={styles.input}
+                  placeholder="e.g. Appendectomy 2019, Cesarean Section 2021"
+                  value={surgeriesText}
+                  onChange={(e) => setSurgeriesText(e.target.value)}
+                />
+              ) : (
+                <p style={styles.valueText}>{surgeriesText || 'None recorded'}</p>
+              )}
+            </div>
+
+            {/* Current Medications */}
+            <div style={styles.field}>
+              <label style={styles.label}>Current Medications</label>
+              {isEditing ? (
+                <input
+                  type="text"
+                  style={styles.input}
+                  placeholder="e.g. Metformin 500mg, Amlodipine 5mg"
+                  value={currentMedicationsText}
+                  onChange={(e) => setCurrentMedicationsText(e.target.value)}
+                />
+              ) : (
+                <p style={styles.valueText}>{currentMedicationsText || 'None recorded'}</p>
+              )}
+            </div>
+
+            {/* Important Notes */}
+            <div style={styles.field}>
+              <label style={styles.label}>Important Medical Notes</label>
+              {isEditing ? (
+                <textarea
+                  style={{ ...styles.input, minHeight: '65px', resize: 'vertical' }}
+                  placeholder="Special instructions, dietary restrictions, pacemaker, etc."
+                  value={importantNotes}
+                  onChange={(e) => setImportantNotes(e.target.value)}
+                />
+              ) : (
+                <p style={styles.valueText}>{importantNotes || 'None recorded'}</p>
+              )}
+            </div>
           </div>
         )}
 
@@ -438,53 +592,112 @@ export const ProfilePage = () => {
               <h3 style={styles.sectionHeading}>{t('emergencyAlert.profileHeader')}</h3>
             </div>
 
-            <div style={styles.field}>
-              <label style={styles.label}>{t('emergencyAlert.contactName')}</label>
-              {isEditing ? (
-                <input
-                  type="text"
-                  style={styles.input}
-                  value={emergencyContactName}
-                  onChange={(e) => setEmergencyContactName(e.target.value)}
-                  placeholder="e.g. Ramesh Kumar"
-                />
-              ) : (
-                <p style={styles.valueText}>{emergencyContactName || 'Ramesh Kumar'}</p>
-              )}
-            </div>
-
-            <div style={styles.twoColGrid}>
-              <div style={styles.field}>
-                <label style={styles.label}>{t('emergencyAlert.contactPhone')}</label>
-                {isEditing ? (
-                  <input
-                    type="tel"
-                    style={styles.input}
-                    value={emergencyContactPhone}
-                    onChange={(e) => setEmergencyContactPhone(e.target.value)}
-                    placeholder="e.g. +91 98765 43210"
-                  />
-                ) : (
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                    <Phone size={14} color="#6D28D9" />
-                    <p style={styles.valueText}>{emergencyContactPhone || '+91 98765 43210'}</p>
-                  </div>
-                )}
+            {/* Primary Contact */}
+            <div style={{ marginBottom: '14px' }}>
+              <div style={{ fontSize: '13px', fontWeight: '700', color: '#991B1B', marginBottom: '8px' }}>
+                Primary Emergency Contact (Priority 1)
               </div>
-
               <div style={styles.field}>
-                <label style={styles.label}>{t('emergencyAlert.contactRelation')}</label>
+                <label style={styles.label}>{t('emergencyAlert.contactName')}</label>
                 {isEditing ? (
                   <input
                     type="text"
                     style={styles.input}
-                    value={emergencyContactRelation}
-                    onChange={(e) => setEmergencyContactRelation(e.target.value)}
-                    placeholder="e.g. Brother / Spouse / Neighbor"
+                    value={emergencyContactName}
+                    onChange={(e) => setEmergencyContactName(e.target.value)}
+                    placeholder="e.g. Ramesh Kumar"
                   />
                 ) : (
-                  <p style={styles.valueText}>{emergencyContactRelation || 'Brother'}</p>
+                  <p style={styles.valueText}>{emergencyContactName || 'Ramesh Kumar'}</p>
                 )}
+              </div>
+
+              <div style={styles.twoColGrid}>
+                <div style={styles.field}>
+                  <label style={styles.label}>{t('emergencyAlert.contactPhone')}</label>
+                  {isEditing ? (
+                    <input
+                      type="tel"
+                      style={styles.input}
+                      value={emergencyContactPhone}
+                      onChange={(e) => setEmergencyContactPhone(e.target.value)}
+                      placeholder="e.g. +91 98765 43210"
+                    />
+                  ) : (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <Phone size={14} color="#6D28D9" />
+                      <p style={styles.valueText}>{emergencyContactPhone || '+91 98765 43210'}</p>
+                    </div>
+                  )}
+                </div>
+
+                <div style={styles.field}>
+                  <label style={styles.label}>{t('emergencyAlert.contactRelation')}</label>
+                  {isEditing ? (
+                    <input
+                      type="text"
+                      style={styles.input}
+                      value={emergencyContactRelation}
+                      onChange={(e) => setEmergencyContactRelation(e.target.value)}
+                      placeholder="e.g. Brother / Spouse / Neighbor"
+                    />
+                  ) : (
+                    <p style={styles.valueText}>{emergencyContactRelation || 'Brother'}</p>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Secondary Contact */}
+            <div style={{ borderTop: '1px solid #FEE2E2', paddingTop: '10px' }}>
+              <div style={{ fontSize: '13px', fontWeight: '700', color: '#6B7280', marginBottom: '8px' }}>
+                Secondary Emergency Contact (Priority 2)
+              </div>
+              <div style={styles.field}>
+                <label style={styles.label}>{t('emergencyAlert.contactName')}</label>
+                {isEditing ? (
+                  <input
+                    type="text"
+                    style={styles.input}
+                    value={emergencyContact2Name}
+                    onChange={(e) => setEmergencyContact2Name(e.target.value)}
+                    placeholder="e.g. Sunita Devi"
+                  />
+                ) : (
+                  <p style={styles.valueText}>{emergencyContact2Name || 'Not configured'}</p>
+                )}
+              </div>
+
+              <div style={styles.twoColGrid}>
+                <div style={styles.field}>
+                  <label style={styles.label}>{t('emergencyAlert.contactPhone')}</label>
+                  {isEditing ? (
+                    <input
+                      type="tel"
+                      style={styles.input}
+                      value={emergencyContact2Phone}
+                      onChange={(e) => setEmergencyContact2Phone(e.target.value)}
+                      placeholder="e.g. +91 98765 43211"
+                    />
+                  ) : (
+                    <p style={styles.valueText}>{emergencyContact2Phone || 'Not configured'}</p>
+                  )}
+                </div>
+
+                <div style={styles.field}>
+                  <label style={styles.label}>{t('emergencyAlert.contactRelation')}</label>
+                  {isEditing ? (
+                    <input
+                      type="text"
+                      style={styles.input}
+                      value={emergencyContact2Relation}
+                      onChange={(e) => setEmergencyContact2Relation(e.target.value)}
+                      placeholder="e.g. Mother / Sister"
+                    />
+                  ) : (
+                    <p style={styles.valueText}>{emergencyContact2Relation || 'Not configured'}</p>
+                  )}
+                </div>
               </div>
             </div>
           </div>

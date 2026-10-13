@@ -29,6 +29,15 @@ db.version(3).stores({
   medicineOrders: 'id, orderId, patientId, pharmacyId, status, createdAt',
 });
 
+// Version 4: Added patientMedications, medicationDoses, refillRequests, followUps, emergencyEvents
+db.version(4).stores({
+  patientMedications: 'id, patientId, medicineName, remainingQuantity, activeStatus',
+  medicationDoses: 'id, medicationId, patientId, scheduledAt, status, syncId, synced',
+  refillRequests: 'id, medicationId, patientId, status, synced',
+  followUps: 'id, patientId, doctorId, dueDate, status, synced',
+  emergencyEvents: 'id, patientId, riskLevel, status, createdAt, synced',
+});
+
 /**
  * Helper to get or set metadata
  */

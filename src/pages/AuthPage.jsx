@@ -48,6 +48,22 @@ export const AuthPage = () => {
   const [gpsAcquiring, setGpsAcquiring] = useState(false);
   const [gpsSuccess, setGpsSuccess] = useState(false);
 
+  // Patient Medical Profile State
+  const [regDob, setRegDob] = useState('');
+  const [regGender, setRegGender] = useState('Male');
+  const [regBloodGroup, setRegBloodGroup] = useState('O+');
+  const [regAllergies, setRegAllergies] = useState('');
+  const [regChronicConditions, setRegChronicConditions] = useState('');
+  const [regSurgeries, setRegSurgeries] = useState('');
+  const [regCurrentMedications, setRegCurrentMedications] = useState('');
+  const [regImportantNotes, setRegImportantNotes] = useState('');
+  const [regContact1Name, setRegContact1Name] = useState('Ramesh Kumar');
+  const [regContact1Rel, setRegContact1Rel] = useState('Brother');
+  const [regContact1Phone, setRegContact1Phone] = useState('+91 98765 43210');
+  const [regContact2Name, setRegContact2Name] = useState('');
+  const [regContact2Rel, setRegContact2Rel] = useState('');
+  const [regContact2Phone, setRegContact2Phone] = useState('');
+
   // Automatically detect real GPS coordinates on mount
   useEffect(() => {
     if (typeof window !== 'undefined' && navigator.geolocation) {
@@ -108,6 +124,26 @@ export const AuthPage = () => {
       setErrorMessage('Please fill in name, phone/email, and password');
       return;
     }
+
+    const emergencyContacts = [
+      {
+        name: regContact1Name || 'Ramesh Kumar',
+        relationship: regContact1Rel || 'Brother',
+        phone: regContact1Phone || '+91 98765 43210',
+        priority: 1,
+      },
+      ...(regContact2Name
+        ? [
+            {
+              name: regContact2Name,
+              relationship: regContact2Rel || 'Family',
+              phone: regContact2Phone,
+              priority: 2,
+            },
+          ]
+        : []),
+    ];
+
     setLoading(true);
     const res = await register({
       name: regName,
@@ -116,6 +152,16 @@ export const AuthPage = () => {
       role: regRole,
       village: regVillage,
       preferredLanguage: regLanguage,
+      dob: regDob,
+      gender: regGender,
+      bloodGroup: regBloodGroup,
+      allergies: regAllergies ? regAllergies.split(',').map((s) => s.trim()).filter(Boolean) : [],
+      chronicConditions: regChronicConditions ? regChronicConditions.split(',').map((s) => s.trim()).filter(Boolean) : [],
+      chronicFlags: regChronicConditions ? regChronicConditions.split(',').map((s) => s.trim()).filter(Boolean) : [],
+      surgeries: regSurgeries ? regSurgeries.split(',').map((s) => s.trim()).filter(Boolean) : [],
+      currentMedications: regCurrentMedications ? regCurrentMedications.split(',').map((s) => s.trim()).filter(Boolean) : [],
+      importantNotes: regImportantNotes,
+      emergencyContacts,
       facilityName: regFacilityName || `${regName} Medical Store`,
       facilityAddress: regFacilityAddress || regVillage,
       facilityPhone: regFacilityPhone || regIdentifier,
@@ -366,6 +412,182 @@ export const AuthPage = () => {
                   </select>
                 </div>
               </div>
+
+              {/* Patient Medical Profile & Emergency Contacts Onboarding */}
+              {regRole === 'patient' && (
+                <div style={styles.pharmacySetupBox}>
+                  <div style={styles.pharmacySetupHeader}>
+                    <Heart size={16} color="#DC2626" />
+                    <span style={{ ...styles.pharmacySetupTitle, color: '#991B1B' }}>
+                      Patient Medical Profile & Emergency Contacts
+                    </span>
+                  </div>
+
+                  <div style={styles.fieldRow2}>
+                    <div style={styles.fieldGroup}>
+                      <label style={styles.label}>Date of Birth (DOB)</label>
+                      <input
+                        type="date"
+                        style={styles.inputPlain}
+                        value={regDob}
+                        onChange={(e) => setRegDob(e.target.value)}
+                      />
+                    </div>
+                    <div style={styles.fieldGroup}>
+                      <label style={styles.label}>Gender</label>
+                      <select
+                        style={styles.inputPlain}
+                        value={regGender}
+                        onChange={(e) => setRegGender(e.target.value)}
+                      >
+                        <option value="Male">Male</option>
+                        <option value="Female">Female</option>
+                        <option value="Other">Other</option>
+                        <option value="Prefer not to say">Prefer not to say</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div style={styles.fieldGroup}>
+                    <label style={styles.label}>Blood Group</label>
+                    <select
+                      style={styles.inputPlain}
+                      value={regBloodGroup}
+                      onChange={(e) => setRegBloodGroup(e.target.value)}
+                    >
+                      <option value="A+">A+</option>
+                      <option value="A-">A-</option>
+                      <option value="B+">B+</option>
+                      <option value="B-">B-</option>
+                      <option value="AB+">AB+</option>
+                      <option value="AB-">AB-</option>
+                      <option value="O+">O+</option>
+                      <option value="O-">O-</option>
+                      <option value="Unknown">Unknown</option>
+                    </select>
+                  </div>
+
+                  <div style={styles.fieldGroup}>
+                    <label style={styles.label}>Allergies (comma-separated)</label>
+                    <input
+                      type="text"
+                      style={styles.inputPlain}
+                      placeholder="e.g. Penicillin, Peanuts, Dust (or none)"
+                      value={regAllergies}
+                      onChange={(e) => setRegAllergies(e.target.value)}
+                    />
+                  </div>
+
+                  <div style={styles.fieldGroup}>
+                    <label style={styles.label}>Existing / Chronic Conditions (comma-separated)</label>
+                    <input
+                      type="text"
+                      style={styles.inputPlain}
+                      placeholder="e.g. Type 2 Diabetes, Hypertension, Asthma"
+                      value={regChronicConditions}
+                      onChange={(e) => setRegChronicConditions(e.target.value)}
+                    />
+                  </div>
+
+                  <div style={styles.fieldGroup}>
+                    <label style={styles.label}>Previous Surgeries / Major Medical History</label>
+                    <input
+                      type="text"
+                      style={styles.inputPlain}
+                      placeholder="e.g. Appendectomy 2018, Gallbladder removal"
+                      value={regSurgeries}
+                      onChange={(e) => setRegSurgeries(e.target.value)}
+                    />
+                  </div>
+
+                  <div style={styles.fieldGroup}>
+                    <label style={styles.label}>Current Medications</label>
+                    <input
+                      type="text"
+                      style={styles.inputPlain}
+                      placeholder="e.g. Metformin 500mg, Amlodipine 5mg"
+                      value={regCurrentMedications}
+                      onChange={(e) => setRegCurrentMedications(e.target.value)}
+                    />
+                  </div>
+
+                  <div style={styles.fieldGroup}>
+                    <label style={styles.label}>Important Medical Notes</label>
+                    <textarea
+                      style={{ ...styles.inputPlain, minHeight: '60px', resize: 'vertical' }}
+                      placeholder="e.g. Prone to dizziness in morning, pacemaker, strict sodium restrictions"
+                      value={regImportantNotes}
+                      onChange={(e) => setRegImportantNotes(e.target.value)}
+                    />
+                  </div>
+
+                  {/* Emergency Contacts */}
+                  <div style={{ marginTop: '12px', borderTop: '1px solid #FEE2E2', paddingTop: '10px' }}>
+                    <div style={{ fontSize: '13px', fontWeight: '700', color: '#991B1B', marginBottom: '8px' }}>
+                      Primary Emergency Contact (Priority 1) *
+                    </div>
+                    <div style={styles.fieldRow2}>
+                      <input
+                        type="text"
+                        style={styles.inputPlain}
+                        placeholder="Contact Name (e.g. Ramesh Kumar)"
+                        value={regContact1Name}
+                        onChange={(e) => setRegContact1Name(e.target.value)}
+                        required
+                      />
+                      <input
+                        type="text"
+                        style={styles.inputPlain}
+                        placeholder="Relationship (e.g. Brother / Spouse)"
+                        value={regContact1Rel}
+                        onChange={(e) => setRegContact1Rel(e.target.value)}
+                        required
+                      />
+                    </div>
+                    <div style={{ marginTop: '6px' }}>
+                      <input
+                        type="tel"
+                        style={styles.inputPlain}
+                        placeholder="Emergency Phone Number (+91 98765 43210)"
+                        value={regContact1Phone}
+                        onChange={(e) => setRegContact1Phone(e.target.value)}
+                        required
+                      />
+                    </div>
+                  </div>
+
+                  <div style={{ marginTop: '12px', borderTop: '1px solid #FEE2E2', paddingTop: '10px' }}>
+                    <div style={{ fontSize: '13px', fontWeight: '700', color: '#6B7280', marginBottom: '8px' }}>
+                      Secondary Emergency Contact (Optional)
+                    </div>
+                    <div style={styles.fieldRow2}>
+                      <input
+                        type="text"
+                        style={styles.inputPlain}
+                        placeholder="Name (e.g. Sunita Devi)"
+                        value={regContact2Name}
+                        onChange={(e) => setRegContact2Name(e.target.value)}
+                      />
+                      <input
+                        type="text"
+                        style={styles.inputPlain}
+                        placeholder="Relationship (e.g. Mother / Neighbor)"
+                        value={regContact2Rel}
+                        onChange={(e) => setRegContact2Rel(e.target.value)}
+                      />
+                    </div>
+                    <div style={{ marginTop: '6px' }}>
+                      <input
+                        type="tel"
+                        style={styles.inputPlain}
+                        placeholder="Phone Number"
+                        value={regContact2Phone}
+                        onChange={(e) => setRegContact2Phone(e.target.value)}
+                      />
+                    </div>
+                  </div>
+                </div>
+              )}
 
               {/* Pharmacy / Medical Center Specific Setup Fields */}
               {regRole === 'pharmacy' && (

@@ -299,6 +299,28 @@ export const healthRecordService = {
       timeoutMs: 5000,
     });
   },
+
+  /**
+   * Get clinical snapshot for doctor consultation
+   */
+  async getPatientClinicalSnapshot(token, patientId) {
+    return await apiRequest(`/api/clinical-summary/${patientId}`, {
+      method: 'GET',
+      token,
+      timeoutMs: 8000,
+    });
+  },
+
+  /**
+   * Get unified chronological timeline for patient
+   */
+  async getPatientTimeline(token, patientId) {
+    return await apiRequest(`/api/clinical-summary/${patientId}/timeline`, {
+      method: 'GET',
+      token,
+      timeoutMs: 8000,
+    });
+  },
 };
 
 export default healthRecordService;

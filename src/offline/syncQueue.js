@@ -10,6 +10,11 @@ export const SYNC_ACTIONS = {
   BOOK_APPOINTMENT: 'BOOK_APPOINTMENT',
   SEARCH_MEDICINES: 'SEARCH_MEDICINES',
   UPDATE_MEDICINE_STOCK: 'UPDATE_MEDICINE_STOCK',
+  CONFIRM_MEDICATION_DOSE: 'CONFIRM_MEDICATION_DOSE',
+  REQUEST_REFILL: 'REQUEST_REFILL',
+  CREATE_FOLLOWUP: 'CREATE_FOLLOWUP',
+  UPDATE_FOLLOWUP: 'UPDATE_FOLLOWUP',
+  SUBMIT_SYMPTOM: 'SUBMIT_SYMPTOM',
 };
 
 /**
@@ -212,6 +217,15 @@ export async function replaySyncQueue(token, onProgress = null) {
           synced: true,
           syncedAt: new Date().toISOString(),
         });
+      } else if (item.type === SYNC_ACTIONS.CONFIRM_MEDICATION_DOSE && responseData.dose) {
+        if (db.medicationDoses) {
+          await db.medicationDoses.put({
+            id: responseData.dose._id || responseData.dose.id,
+            ...responseData.dose,
+            synced: true,
+            syncedAt: new Date().toISOString(),
+          });
+        }
       }
 
       // Remove from queue
