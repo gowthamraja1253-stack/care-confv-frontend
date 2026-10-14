@@ -70,6 +70,7 @@ export const TeleconsultationRoom = ({ appointment, onLeaveRoom }) => {
   // Media & WebRTC Signaling state
   const [localStream, setLocalStream] = useState(null);
   const [hasRemoteStream, setHasRemoteStream] = useState(false);
+  const [remoteVideoPlaying, setRemoteVideoPlaying] = useState(false);
   const [isPeerConnected, setIsPeerConnected] = useState(false);
   const [remotePeerInfo, setRemotePeerInfo] = useState(null);
   const [connectionStatus, setConnectionStatus] = useState('waiting'); // 'waiting' | 'connecting' | 'connected' | 'failed' | 'disconnected'
@@ -201,17 +202,18 @@ export const TeleconsultationRoom = ({ appointment, onLeaveRoom }) => {
     const ctx = offscreenCanvas.getContext('2d');
 
     const frameInterval = setInterval(() => {
-      if (localVideoRef.current && socketRef.current && localVideoRef.current.readyState >= 2) {
+      const vid = localVideoRef.current;
+      if (vid && socketRef.current && (vid.readyState >= 1 || vid.videoWidth > 0)) {
         try {
-          ctx.drawImage(localVideoRef.current, 0, 0, 320, 240);
-          const frameData = offscreenCanvas.toDataURL('image/jpeg', 0.45);
+          ctx.drawImage(vid, 0, 0, 320, 240);
+          const frameData = offscreenCanvas.toDataURL('image/jpeg', 0.5);
           socketRef.current.emit('video-frame', {
             roomId,
             frameData,
           });
         } catch (e) {}
       }
-    }, 120);
+    }, 100);
 
     return () => clearInterval(frameInterval);
   }, [localStream, isVideoMuted, callEnded, roomId]);
@@ -367,7 +369,7 @@ export const TeleconsultationRoom = ({ appointment, onLeaveRoom }) => {
       remoteVideoRef.current.srcObject = remoteStreamRef.current;
       remoteVideoRef.current.play().catch(() => {});
     }
-  }, [hasRemoteStream, isRemoteVideoMuted]);
+  }, [hasRemoteStream, isRemoteVideoMuted, isPeerConnected]);
 
   useEffect(() => {
     if (localVideoRef.current && localStream) {
@@ -512,11 +514,37 @@ export const TeleconsultationRoom = ({ appointment, onLeaveRoom }) => {
           remoteStreamRef.current = stream;
         }
 
+        // Combine all receivers so audio and video tracks are always simultaneously in the stream
+        const allReceivers = pc.getReceivers().map((r) => r.track).filter(Boolean);
+        if (allReceivers.length > 0) {
+          stream = new MediaStream(allReceivers);
+          remoteStreamRef.current = stream;
+        }
+
         if (remoteVideoRef.current) {
           remoteVideoRef.current.srcObject = stream;
           remoteVideoRef.current.play().catch(() => {});
         }
-        setHasRemoteStream(true);
+
+        event.track.onunmute = () => {
+          console.log('[WebRTC] Remote track unmuted:', event.track.kind);
+          if (event.track.kind === 'video') {
+            setRemoteVideoPlaying(true);
+            setHasRemoteStream(true);
+          }
+          if (remoteVideoRef.current) {
+            const currentTracks = pc.getReceivers().map((r) => r.track).filter(Boolean);
+            if (currentTracks.length > 0) {
+              remoteVideoRef.current.srcObject = new MediaStream(currentTracks);
+              remoteVideoRef.current.play().catch(() => {});
+            }
+          }
+        };
+
+        if (event.track.kind === 'video') {
+          setHasRemoteStream(true);
+          setRemoteVideoPlaying(true);
+        }
         setIsPeerConnected(true);
         setConnectionStatus('connected');
       };
@@ -526,14 +554,18 @@ export const TeleconsultationRoom = ({ appointment, onLeaveRoom }) => {
         console.log('[WebRTC] Connection state:', pc.connectionState);
         if (pc.connectionState === 'connected') {
           setIsPeerConnected(true);
-          setHasRemoteStream(true);
           setConnectionStatus('connected');
+          if (remoteStreamRef.current && remoteStreamRef.current.getVideoTracks().length > 0) {
+            setHasRemoteStream(true);
+          }
         } else if (pc.connectionState === 'failed') {
           setIsPeerConnected(false);
           setHasRemoteStream(false);
+          setRemoteVideoPlaying(false);
           setConnectionStatus('failed');
         } else if (pc.connectionState === 'disconnected') {
           setIsPeerConnected(false);
+          setRemoteVideoPlaying(false);
           setConnectionStatus('disconnected');
         } else if (pc.connectionState === 'connecting') {
           setConnectionStatus('connecting');
@@ -545,14 +577,18 @@ export const TeleconsultationRoom = ({ appointment, onLeaveRoom }) => {
         console.log('[WebRTC] ICE connection state:', pc.iceConnectionState);
         if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
           setIsPeerConnected(true);
-          setHasRemoteStream(true);
           setConnectionStatus('connected');
+          if (remoteStreamRef.current && remoteStreamRef.current.getVideoTracks().length > 0) {
+            setHasRemoteStream(true);
+          }
         } else if (pc.iceConnectionState === 'failed') {
           setIsPeerConnected(false);
           setHasRemoteStream(false);
+          setRemoteVideoPlaying(false);
           setConnectionStatus('failed');
         } else if (pc.iceConnectionState === 'disconnected') {
           setIsPeerConnected(false);
+          setRemoteVideoPlaying(false);
           setConnectionStatus('disconnected');
         }
       };
@@ -1654,78 +1690,107 @@ export const TeleconsultationRoom = ({ appointment, onLeaveRoom }) => {
                  <p style={{color: '#94A3B8'}}>Video degraded to preserve audio and clinical chat</p>
                  <audio ref={remoteVideoRef} autoPlay />
               </div>
-            ) : hasRemoteStream && !isRemoteVideoMuted ? (
-              /* 1. Primary: Live WebRTC Video Stream (high performance, 30fps + voice) */
-              <video
-                ref={remoteVideoRef}
-                autoPlay
-                playsInline
-                onLoadedMetadata={(e) => e.target.play().catch(() => {})}
-                style={styles.remoteVideoElement}
-              />
-            ) : remoteVideoFrame && !isRemoteVideoMuted ? (
-              /* 2. Fallback: Socket-based frame broadcast (guarantees video visibility even before WebRTC connects) */
-              <img
-                src={remoteVideoFrame}
-                alt="Remote Live Video Stream"
-                style={styles.remoteVideoElement}
-              />
-            ) : null}
+            ) : (
+              <div style={{ position: 'relative', width: '100%', height: '100%', backgroundColor: '#000000', overflow: 'hidden' }}>
+                {/* 1. Real-Time Frame broadcast (always ready and active, guarantees video visibility) */}
+                {remoteVideoFrame && !isRemoteVideoMuted && (
+                  <img
+                    src={remoteVideoFrame}
+                    alt="Remote Live Video Stream"
+                    style={{
+                      ...styles.remoteVideoElement,
+                      position: 'absolute',
+                      top: 0,
+                      left: 0,
+                      width: '100%',
+                      height: '100%',
+                      objectFit: 'cover',
+                      zIndex: 1,
+                    }}
+                  />
+                )}
 
-            {/* Peer Waiting / Audio Only / Cam Off Backdrop */}
-            {(!hasRemoteStream || isRemoteVideoMuted) && !remoteVideoFrame && (
-              <div style={styles.simulatedRemoteFeed}>
-                <div style={styles.doctorBackdrop}>
-                  <div style={styles.pulseRing}>
-                    <div style={styles.doctorLiveAvatar}>
-                      {isDoctor ? (
-                        <User size={60} color="#6D28D9" strokeWidth={2.2} />
-                      ) : (
-                        <Stethoscope size={60} color="#6D28D9" strokeWidth={2.2} />
+                {/* 2. Primary: Live WebRTC Video Stream (always mounted so ref binds immediately, active on top when playing) */}
+                <video
+                  ref={remoteVideoRef}
+                  autoPlay
+                  playsInline
+                  onLoadedMetadata={(e) => {
+                    e.target.play().catch(() => {});
+                  }}
+                  onPlaying={() => setRemoteVideoPlaying(true)}
+                  onWaiting={() => setRemoteVideoPlaying(false)}
+                  onError={() => setRemoteVideoPlaying(false)}
+                  style={{
+                    ...styles.remoteVideoElement,
+                    position: 'absolute',
+                    top: 0,
+                    left: 0,
+                    width: '100%',
+                    height: '100%',
+                    objectFit: 'cover',
+                    zIndex: 2,
+                    opacity: (hasRemoteStream && remoteVideoPlaying && !isRemoteVideoMuted) ? 1 : (remoteVideoFrame ? 0 : 1),
+                    display: isRemoteVideoMuted ? 'none' : 'block',
+                  }}
+                />
+
+                {/* 3. Peer Waiting / Audio Only / Cam Off Backdrop */}
+                {(!hasRemoteStream || isRemoteVideoMuted) && !remoteVideoFrame && !remoteVideoPlaying && (
+                  <div style={{ ...styles.simulatedRemoteFeed, position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', zIndex: 3 }}>
+                    <div style={styles.doctorBackdrop}>
+                      <div style={styles.pulseRing}>
+                        <div style={styles.doctorLiveAvatar}>
+                          {isDoctor ? (
+                            <User size={60} color="#2563EB" strokeWidth={2.2} />
+                          ) : (
+                            <Stethoscope size={60} color="#2563EB" strokeWidth={2.2} />
+                          )}
+                        </div>
+                      </div>
+                      <h3 style={styles.livePeerName}>{peerName}</h3>
+                      <span
+                        style={{
+                          ...styles.livePeerStatus,
+                          color: isPeerConnected ? '#34D399' : connectionStatus === 'failed' ? '#EF4444' : '#FBBF24',
+                        }}
+                      >
+                        {isPeerConnected
+                          ? (isRemoteVideoMuted ? '🟢 Live Voice Connected (Camera Off)' : '🟢 Live WebRTC Peer Connected')
+                          : connectionStatus === 'connected'
+                          ? '🟢 Live WebRTC Peer Connected'
+                          : connectionStatus === 'connecting'
+                          ? `🟡 Connecting with ${remotePeerInfo?.userName || peerName}...`
+                          : connectionStatus === 'failed'
+                          ? '🔴 Connection Failed'
+                          : connectionStatus === 'disconnected'
+                          ? '🟠 Disconnected from peer'
+                          : remotePeerInfo
+                          ? `🟡 ${remotePeerInfo.userName || peerName} in room, connecting...`
+                          : '🟡 Waiting for peer to enter room...'}
+                      </span>
+                      {(connectionStatus === 'failed' || connectionStatus === 'disconnected') && (
+                        <button
+                          type="button"
+                          onClick={handleManualReconnect}
+                          style={styles.retryConnectionBtn}
+                        >
+                          🔄 Retry Connection
+                        </button>
                       )}
+                      {isRemoteAudioMuted && (
+                        <span style={styles.remoteMutedTag}>Peer Microphone Muted</span>
+                      )}
+                      {isRemoteVideoMuted && hasRemoteStream && (
+                        <span style={styles.remoteMutedTag}>Peer Camera Off</span>
+                      )}
+                      <div style={styles.encryptionBadge}>
+                        <ShieldCheck size={14} color="#059669" />
+                        <span>{t('teleconsult.encrypted')}</span>
+                      </div>
                     </div>
                   </div>
-                  <h3 style={styles.livePeerName}>{peerName}</h3>
-                  <span
-                    style={{
-                      ...styles.livePeerStatus,
-                      color: isPeerConnected ? '#34D399' : connectionStatus === 'failed' ? '#EF4444' : '#FBBF24',
-                    }}
-                  >
-                    {isPeerConnected
-                      ? (isRemoteVideoMuted ? '🟢 Live Voice Connected (Camera Off)' : '🟢 Live WebRTC Peer Connected')
-                      : connectionStatus === 'connected'
-                      ? '🟢 Live WebRTC Peer Connected'
-                      : connectionStatus === 'connecting'
-                      ? `🟡 Connecting with ${remotePeerInfo?.userName || peerName}...`
-                      : connectionStatus === 'failed'
-                      ? '🔴 Connection Failed'
-                      : connectionStatus === 'disconnected'
-                      ? '🟠 Disconnected from peer'
-                      : remotePeerInfo
-                      ? `🟡 ${remotePeerInfo.userName || peerName} in room, connecting...`
-                      : '🟡 Waiting for peer to enter room...'}
-                  </span>
-                  {(connectionStatus === 'failed' || connectionStatus === 'disconnected') && (
-                    <button
-                      type="button"
-                      onClick={handleManualReconnect}
-                      style={styles.retryConnectionBtn}
-                    >
-                      🔄 Retry Connection
-                    </button>
-                  )}
-                  {isRemoteAudioMuted && (
-                    <span style={styles.remoteMutedTag}>Peer Microphone Muted</span>
-                  )}
-                  {isRemoteVideoMuted && hasRemoteStream && (
-                    <span style={styles.remoteMutedTag}>Peer Camera Off</span>
-                  )}
-                  <div style={styles.encryptionBadge}>
-                    <ShieldCheck size={14} color="#059669" />
-                    <span>{t('teleconsult.encrypted')}</span>
-                  </div>
-                </div>
+                )}
               </div>
             )}
 
