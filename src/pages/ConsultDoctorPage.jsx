@@ -149,6 +149,32 @@ export const ConsultDoctorPage = ({ onBack, onStartCall }) => {
         </div>
       </div>
 
+      {/* Active Consultation Quick-Join Banner */}
+      <div style={{ backgroundColor: '#EDE9FE', border: '1.5px solid #DDD6FE', borderRadius: '12px', padding: '10px 14px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px', boxShadow: '0 2px 8px rgba(109, 40, 217, 0.08)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <Video size={20} color="#6D28D9" />
+          <div>
+            <strong style={{ fontSize: '0.82rem', color: '#1E1B4B', display: 'block' }}>Active Teleconsultation Ready (TK-08)</strong>
+            <span style={{ fontSize: '0.72rem', color: '#6D28D9', fontWeight: '600' }}>Dr. Ananya Sharma • Room: room-apt-001</span>
+          </div>
+        </div>
+        <button
+          type="button"
+          id="btn-join-teleconsult-direct"
+          onClick={() => onStartCall && onStartCall({
+            _id: 'apt-001',
+            roomId: 'room-apt-001',
+            patientName: user?.name || 'Kavita Devi',
+            doctorName: 'Dr. Ananya Sharma',
+            tokenNumber: 'TK-08',
+          })}
+          style={{ backgroundColor: '#6D28D9', color: '#FFFFFF', border: 'none', borderRadius: '8px', padding: '7px 14px', fontSize: '0.78rem', fontWeight: '800', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '5px' }}
+        >
+          <Video size={14} color="#FFFFFF" />
+          <span>Join Call Now</span>
+        </button>
+      </div>
+
       {/* Error Notice */}
       {errorMessage && (
         <div style={styles.errorBanner}>

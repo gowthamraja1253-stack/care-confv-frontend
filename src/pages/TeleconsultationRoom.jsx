@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import io from 'socket.io-client';
+import { createSocket } from '../utils/socketClient';
 import { useAuth } from '../context/AuthContext';
 import { useTranslation } from 'react-i18next';
 import appointmentService from '../services/appointment.service';
@@ -36,7 +37,9 @@ import {
   Download,
   Languages,
   RotateCcw,
-  Calendar
+  Calendar,
+  ChevronDown,
+  ChevronUp
 } from 'lucide-react';
 import ClinicalSnapshotModal from '../components/ClinicalSnapshotModal';
 
@@ -62,20 +65,14 @@ export const TeleconsultationRoom = ({ appointment, onLeaveRoom }) => {
   const { user, token } = useAuth();
 
   const isDoctor = user?.role === 'doctor';
-  const peerName = isDoctor
-    ? (appointment?.patientName || 'Patient')
-    : (appointment?.doctorName || 'Dr. Ananya Sharma');
-  const peerSubtitle = isDoctor
-    ? `Patient (${appointment?.patientAge || 35} yrs, ${appointment?.patientVillage || 'Rampur'})`
-    : (appointment?.doctorSpecialization || 'General Physician');
-
   const roomId = appointment?.roomId || `room-${appointment?._id || 'general'}`;
 
-  // Media state
+  // Media & WebRTC Signaling state
   const [localStream, setLocalStream] = useState(null);
   const [hasRemoteStream, setHasRemoteStream] = useState(false);
   const [isPeerConnected, setIsPeerConnected] = useState(false);
   const [remotePeerInfo, setRemotePeerInfo] = useState(null);
+  const [connectionStatus, setConnectionStatus] = useState('waiting'); // 'waiting' | 'connecting' | 'connected' | 'failed' | 'disconnected'
   const [isAudioMuted, setIsAudioMuted] = useState(false);
   const [isVideoMuted, setIsVideoMuted] = useState(false);
   const [isRemoteAudioMuted, setIsRemoteAudioMuted] = useState(false);
@@ -83,16 +80,29 @@ export const TeleconsultationRoom = ({ appointment, onLeaveRoom }) => {
   const [mediaError, setMediaError] = useState('');
   const [callDuration, setCallDuration] = useState(0);
 
-  // Drawers state
+  // Responsive UI & Drawer state
   const [showChat, setShowChat] = useState(false);
   const [showPrescriptionDrawer, setShowPrescriptionDrawer] = useState(false);
   const [showTranslationSettings, setShowTranslationSettings] = useState(false);
+  const [isTranslationExpanded, setIsTranslationExpanded] = useState(false);
+  const [pipPosition, setPipPosition] = useState('top'); // 'top' | 'bottom'
+  const [showDevSim, setShowDevSim] = useState(false);
   const [unreadChatCount, setUnreadChatCount] = useState(0);
   const [prescriptionAlert, setPrescriptionAlert] = useState(null);
   const [showClinicalSnapshotModal, setShowClinicalSnapshotModal] = useState(false);
   const [followUpPreset, setFollowUpPreset] = useState('7');
   const [customFollowUpDate, setCustomFollowUpDate] = useState('');
   const [followUpReason, setFollowUpReason] = useState('Evaluate response to treatment and symptom relief');
+
+  // Dynamic Peer Name and Subtitle reflecting real connected participant
+  const peerName = remotePeerInfo?.userName || (isDoctor
+    ? (appointment?.patientName || 'Patient')
+    : (appointment?.doctorName || 'Dr. Ananya Sharma'));
+  const peerSubtitle = remotePeerInfo?.userRole
+    ? (remotePeerInfo.userRole.charAt(0).toUpperCase() + remotePeerInfo.userRole.slice(1))
+    : (isDoctor
+      ? `Patient (${appointment?.patientAge || 35} yrs, ${appointment?.patientVillage || 'Rampur'})`
+      : (appointment?.doctorSpecialization || 'General Physician'));
 
   // Live Audio Translation AI state
   const [isLiveTranslationActive, setIsLiveTranslationActive] = useState(true);
@@ -107,6 +117,12 @@ export const TeleconsultationRoom = ({ appointment, onLeaveRoom }) => {
   const targetLangRef = useRef(targetLang);
   const sourceLangRef = useRef(sourceLang);
   const speakVoiceoverRef = useRef(speakVoiceover);
+  const remotePeerInfoRef = useRef(remotePeerInfo);
+  const targetSocketIdRef = useRef(null);
+  const pendingIceCandidatesRef = useRef([]);
+  const localStreamRef = useRef(null);
+  const isMakingOfferRef = useRef(false);
+  const reconnectTimeoutRef = useRef(null);
 
   useEffect(() => {
     targetLangRef.current = targetLang;
@@ -119,6 +135,14 @@ export const TeleconsultationRoom = ({ appointment, onLeaveRoom }) => {
   useEffect(() => {
     speakVoiceoverRef.current = speakVoiceover;
   }, [speakVoiceover]);
+
+  useEffect(() => {
+    remotePeerInfoRef.current = remotePeerInfo;
+  }, [remotePeerInfo]);
+
+  useEffect(() => {
+    localStreamRef.current = localStream;
+  }, [localStream]);
 
   // Chat state
   const [chatMessages, setChatMessages] = useState([
@@ -416,14 +440,43 @@ export const TeleconsultationRoom = ({ appointment, onLeaveRoom }) => {
     return stream;
   };
 
+  // Helper: Manual Reconnect
+  const handleManualReconnect = () => {
+    console.log('[WebRTC] Initiating manual reconnection...');
+    setConnectionStatus('connecting');
+    if (peerConnectionRef.current) {
+      try {
+        peerConnectionRef.current.close();
+      } catch (e) {}
+      peerConnectionRef.current = null;
+    }
+    if (socketRef.current) {
+      socketRef.current.emit('leave-room', { roomId });
+      socketRef.current.emit(
+        'join-room',
+        {
+          roomId,
+          userId: user?._id || user?.id || 'guest-user',
+          userName: user?.name || (isDoctor ? 'Doctor' : 'Patient'),
+          userRole: user?.role || 'patient',
+        },
+        (ack) => {
+          console.log('[Socket] Reconnect join-room ack:', ack);
+        }
+      );
+    }
+  };
+
   // 2. Initialize WebRTC Media Stream and Socket.IO connection
   useEffect(() => {
     let activeMediaStream = null;
     let socket = null;
-    const pendingIceCandidates = [];
 
     // Helper: Initialize Peer Connection
     const createPeerConnection = (targetSocketId) => {
+      targetSocketIdRef.current = targetSocketId;
+      pendingIceCandidatesRef.current = [];
+
       if (peerConnectionRef.current) {
         try {
           peerConnectionRef.current.close();
@@ -436,9 +489,10 @@ export const TeleconsultationRoom = ({ appointment, onLeaveRoom }) => {
 
       // Handle ICE Candidates
       pc.onicecandidate = (event) => {
-        if (event.candidate && socketRef.current) {
+        const target = targetSocketIdRef.current || targetSocketId;
+        if (event.candidate && socketRef.current && target) {
           socketRef.current.emit('webrtc-ice-candidate', {
-            targetSocketId,
+            targetSocketId: target,
             candidate: event.candidate,
           });
         }
@@ -464,6 +518,7 @@ export const TeleconsultationRoom = ({ appointment, onLeaveRoom }) => {
         }
         setHasRemoteStream(true);
         setIsPeerConnected(true);
+        setConnectionStatus('connected');
       };
 
       // Handle Connection State Changes
@@ -472,16 +527,45 @@ export const TeleconsultationRoom = ({ appointment, onLeaveRoom }) => {
         if (pc.connectionState === 'connected') {
           setIsPeerConnected(true);
           setHasRemoteStream(true);
-        } else if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
+          setConnectionStatus('connected');
+        } else if (pc.connectionState === 'failed') {
           setIsPeerConnected(false);
           setHasRemoteStream(false);
+          setConnectionStatus('failed');
+        } else if (pc.connectionState === 'disconnected') {
+          setIsPeerConnected(false);
+          setConnectionStatus('disconnected');
+        } else if (pc.connectionState === 'connecting') {
+          setConnectionStatus('connecting');
+        }
+      };
+
+      // Handle ICE Connection State Changes
+      pc.oniceconnectionstatechange = () => {
+        console.log('[WebRTC] ICE connection state:', pc.iceConnectionState);
+        if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
+          setIsPeerConnected(true);
+          setHasRemoteStream(true);
+          setConnectionStatus('connected');
+        } else if (pc.iceConnectionState === 'failed') {
+          setIsPeerConnected(false);
+          setHasRemoteStream(false);
+          setConnectionStatus('failed');
+        } else if (pc.iceConnectionState === 'disconnected') {
+          setIsPeerConnected(false);
+          setConnectionStatus('disconnected');
         }
       };
 
       // Add local tracks to peer connection
-      if (activeMediaStream) {
-        activeMediaStream.getTracks().forEach((track) => {
-          pc.addTrack(track, activeMediaStream);
+      const streamToAdd = activeMediaStream || localStreamRef.current;
+      if (streamToAdd) {
+        streamToAdd.getTracks().forEach((track) => {
+          try {
+            pc.addTrack(track, streamToAdd);
+          } catch (e) {
+            console.warn('[WebRTC] Track add notice:', e);
+          }
         });
       }
 
@@ -490,13 +574,43 @@ export const TeleconsultationRoom = ({ appointment, onLeaveRoom }) => {
 
     const flushIceCandidates = async (pc) => {
       if (!pc || !pc.remoteDescription) return;
-      while (pendingIceCandidates.length > 0) {
-        const candidate = pendingIceCandidates.shift();
+      while (pendingIceCandidatesRef.current.length > 0) {
+        const candidate = pendingIceCandidatesRef.current.shift();
         try {
           await pc.addIceCandidate(new RTCIceCandidate(candidate));
         } catch (e) {
-          console.warn('[WebRTC] Flushed candidate error:', e);
+          console.warn('[WebRTC] Flushed candidate notice:', e);
         }
+      }
+    };
+
+    // Caller helper: creates and emits WebRTC offer
+    const initiateOffer = async (targetSocketId) => {
+      if (!targetSocketId || isMakingOfferRef.current) return;
+      isMakingOfferRef.current = true;
+      try {
+        console.log('[WebRTC] Creating and sending offer to:', targetSocketId);
+        const pc = createPeerConnection(targetSocketId);
+        const offer = await pc.createOffer({
+          offerToReceiveAudio: true,
+          offerToReceiveVideo: true,
+        });
+        await pc.setLocalDescription(offer);
+        if (socketRef.current) {
+          socketRef.current.emit('webrtc-offer', {
+            targetSocketId,
+            sdp: offer,
+            callerInfo: {
+              userName: user?.name,
+              userRole: user?.role,
+            },
+          });
+        }
+      } catch (err) {
+        console.error('[WebRTC] Error initiating offer:', err);
+        setConnectionStatus('failed');
+      } finally {
+        isMakingOfferRef.current = false;
       }
     };
 
@@ -511,7 +625,6 @@ export const TeleconsultationRoom = ({ appointment, onLeaveRoom }) => {
         }
       } catch (err) {
         console.warn('[WebRTC] Primary webcam busy or locked by other tab, creating live fallback stream:', err.message);
-        // Create live canvas video stream + audio fallback
         const canvasStream = createFallbackVideoStream(user?.name, user?.role);
         try {
           const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true }).catch(() => null);
@@ -524,75 +637,106 @@ export const TeleconsultationRoom = ({ appointment, onLeaveRoom }) => {
 
       if (activeMediaStream) {
         setLocalStream(activeMediaStream);
+        localStreamRef.current = activeMediaStream;
         if (localVideoRef.current) {
           localVideoRef.current.srcObject = activeMediaStream;
           localVideoRef.current.play().catch(() => {});
         }
       }
 
-      // Step B: Connect Socket.IO
-      socket = io({
-        transports: ['websocket', 'polling'],
-        reconnectionAttempts: 5,
+      // Step B: Connect Socket.IO using resilient socket factory
+      socket = createSocket({
+        auth: { token },
+        reconnectionAttempts: 10,
       });
       socketRef.current = socket;
 
       socket.on('connect', () => {
         console.log('[Socket] Connected to server as:', socket.id);
 
-        // Join room
-        socket.emit('join-room', {
-          roomId,
-          userId: user?._id || user?.id || 'guest-user',
-          userName: user?.name || (isDoctor ? 'Doctor' : 'Patient'),
-          userRole: user?.role || 'patient',
-        });
+        // Join room with acknowledgment
+        socket.emit(
+          'join-room',
+          {
+            roomId,
+            userId: user?._id || user?.id || 'guest-user',
+            userName: user?.name || (isDoctor ? 'Doctor' : 'Patient'),
+            userRole: user?.role || 'patient',
+          },
+          (ack) => {
+            console.log('[Socket] join-room acknowledged by server:', ack);
+          }
+        );
       });
 
-      // Step C: If peers already exist in room, create offer to connect
+      // Step C: When this peer joins, server sends existing participants in room
       socket.on('existing-participants', async ({ participants }) => {
         console.log('[Socket] Existing room participants:', participants);
-        if (participants && participants.length > 0) {
-          const firstPeer = participants[0];
-          setRemotePeerInfo(firstPeer);
-          setIsPeerConnected(true);
+        const currentUserId = user?._id || user?.id;
+        const validPeers = (participants || []).filter(
+          (p) => p.socketId !== socket.id && (!currentUserId || String(p.userId) !== String(currentUserId))
+        );
 
-          // Initiate WebRTC Call
-          const pc = createPeerConnection(firstPeer.socketId);
-          try {
-            const offer = await pc.createOffer({
-              offerToReceiveAudio: true,
-              offerToReceiveVideo: true,
-            });
-            await pc.setLocalDescription(offer);
-            socket.emit('webrtc-offer', {
-              targetSocketId: firstPeer.socketId,
-              sdp: offer,
-              callerInfo: {
-                userName: user?.name,
-                userRole: user?.role,
-              },
-            });
-          } catch (offerErr) {
-            console.error('[WebRTC] Error creating offer:', offerErr);
-          }
+        if (validPeers.length > 0) {
+          const caller = validPeers[0];
+          targetSocketIdRef.current = caller.socketId;
+          setRemotePeerInfo(caller);
+          setConnectionStatus('connecting');
+
+          // Receiving peer: prepares peer connection and waits for the caller to send an offer
+          createPeerConnection(caller.socketId);
+
+          // Fallback: If caller offer delayed > 3.5s and still stable, initiate negotiation
+          if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
+          reconnectTimeoutRef.current = setTimeout(() => {
+            const pc = peerConnectionRef.current;
+            if (pc && pc.signalingState === 'stable' && !pc.remoteDescription) {
+              console.log('[WebRTC] Initiating fallback offer to caller:', caller.socketId);
+              initiateOffer(caller.socketId);
+            }
+          }, 3500);
         }
       });
 
-      // Step D: When a new peer joins the room
-      // The newly joining peer receives 'existing-participants' and creates the offer.
-      // The peer already in the room receives 'user-joined' and waits for the incoming offer.
-      socket.on('user-joined', ({ socketId, userName, userRole }) => {
-        console.log(`[Socket] Peer joined: ${userName} (${userRole})`);
-        setRemotePeerInfo({ socketId, userName, userRole });
-        setIsPeerConnected(true);
+      // Step D: When a second peer joins the room, caller receives 'user-joined'
+      socket.on('user-joined', ({ socketId, userId, userName, userRole }) => {
+        console.log(`[Socket] Peer joined: ${userName} (${userRole}), socket: ${socketId}`);
+        const currentUserId = user?._id || user?.id;
+        if (socketId === socket.id || (currentUserId && String(userId) === String(currentUserId))) {
+          return;
+        }
+
+        targetSocketIdRef.current = socketId;
+        setRemotePeerInfo({ socketId, userId, userName, userRole });
+        setConnectionStatus('connecting');
+
+        // The caller creates and sends an offer when the second peer joins
+        initiateOffer(socketId);
       });
 
       // Step E: Receive WebRTC Offer
       socket.on('webrtc-offer', async ({ senderSocketId, sdp, callerInfo }) => {
         console.log('[WebRTC] Received offer from:', senderSocketId);
-        setRemotePeerInfo({ socketId: senderSocketId, ...callerInfo });
-        const pc = createPeerConnection(senderSocketId);
+        if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
+
+        targetSocketIdRef.current = senderSocketId;
+        setRemotePeerInfo((prev) => ({ ...(prev || {}), socketId: senderSocketId, ...callerInfo }));
+        setConnectionStatus('connecting');
+
+        let pc = peerConnectionRef.current;
+        if (!pc || pc.signalingState === 'closed') {
+          pc = createPeerConnection(senderSocketId);
+        }
+
+        // Connection guards: handle offer collision / rollback if needed
+        if (pc.signalingState !== 'stable') {
+          console.warn(`[WebRTC] Handling offer collision in state '${pc.signalingState}'`);
+          try {
+            await pc.setRemoteDescription({ type: 'rollback' });
+          } catch (e) {
+            console.warn('[WebRTC] Rollback notice:', e);
+          }
+        }
 
         try {
           await pc.setRemoteDescription(new RTCSessionDescription(sdp));
@@ -601,12 +745,15 @@ export const TeleconsultationRoom = ({ appointment, onLeaveRoom }) => {
           const answer = await pc.createAnswer();
           await pc.setLocalDescription(answer);
 
-          socket.emit('webrtc-answer', {
-            targetSocketId: senderSocketId,
-            sdp: answer,
-          });
+          if (socketRef.current) {
+            socketRef.current.emit('webrtc-answer', {
+              targetSocketId: senderSocketId,
+              sdp: answer,
+            });
+          }
         } catch (ansErr) {
           console.error('[WebRTC] Error handling offer & creating answer:', ansErr);
+          setConnectionStatus('failed');
         }
       });
 
@@ -621,6 +768,7 @@ export const TeleconsultationRoom = ({ appointment, onLeaveRoom }) => {
               await flushIceCandidates(pc);
             } catch (err) {
               console.error('[WebRTC] Error setting remote description for answer:', err);
+              setConnectionStatus('failed');
             }
           } else {
             console.warn(`[WebRTC] Skipping setRemoteDescription for answer because signalingState is '${pc.signalingState}' (expected 'have-local-offer')`);
@@ -630,17 +778,16 @@ export const TeleconsultationRoom = ({ appointment, onLeaveRoom }) => {
 
       // Step G: Receive ICE Candidate
       socket.on('webrtc-ice-candidate', async ({ candidate }) => {
-        if (candidate) {
-          const pc = peerConnectionRef.current;
-          if (pc && pc.remoteDescription && pc.remoteDescription.type) {
-            try {
-              await pc.addIceCandidate(new RTCIceCandidate(candidate));
-            } catch (iceErr) {
-              console.warn('[WebRTC] Error adding ICE candidate:', iceErr);
-            }
-          } else {
-            pendingIceCandidates.push(candidate);
+        if (!candidate) return;
+        const pc = peerConnectionRef.current;
+        if (pc && pc.remoteDescription && pc.remoteDescription.type) {
+          try {
+            await pc.addIceCandidate(new RTCIceCandidate(candidate));
+          } catch (iceErr) {
+            console.warn('[WebRTC] Error adding ICE candidate:', iceErr);
           }
+        } else {
+          pendingIceCandidatesRef.current.push(candidate);
         }
       });
 
@@ -749,11 +896,24 @@ export const TeleconsultationRoom = ({ appointment, onLeaveRoom }) => {
       });
 
       // Step M: Peer left room
-      socket.on('user-left', () => {
-        console.log('[Socket] Peer left the teleconsultation room');
-        setIsPeerConnected(false);
-        setHasRemoteStream(false);
-        setRemotePeerInfo(null);
+      socket.on('user-left', ({ socketId, userId }) => {
+        console.log('[Socket] Peer left room:', socketId);
+        const activePeer = remotePeerInfoRef.current;
+        const currentTargetSocket = targetSocketIdRef.current;
+        const isCurrentPeerSocket = (activePeer && activePeer.socketId === socketId) || currentTargetSocket === socketId;
+        if (isCurrentPeerSocket) {
+          setIsPeerConnected(false);
+          setHasRemoteStream(false);
+          setRemotePeerInfo(null);
+          setConnectionStatus('waiting');
+          targetSocketIdRef.current = null;
+          if (peerConnectionRef.current) {
+            try {
+              peerConnectionRef.current.close();
+            } catch (e) {}
+            peerConnectionRef.current = null;
+          }
+        }
       });
     };
 
@@ -761,18 +921,22 @@ export const TeleconsultationRoom = ({ appointment, onLeaveRoom }) => {
 
     // Cleanup on unmount
     return () => {
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+      }
       if (activeMediaStream) {
         activeMediaStream.getTracks().forEach((track) => track.stop());
       }
       if (peerConnectionRef.current) {
         peerConnectionRef.current.close();
+        peerConnectionRef.current = null;
       }
       if (socketRef.current) {
         socketRef.current.emit('leave-room', { roomId });
         socketRef.current.disconnect();
       }
     };
-  }, [roomId, user]);
+  }, [roomId, user?._id || user?.id, token]);
 
   // 3. Call Timer
   useEffect(() => {
@@ -1051,24 +1215,54 @@ export const TeleconsultationRoom = ({ appointment, onLeaveRoom }) => {
 
   return (
     <div style={styles.roomContainer}>
-      {/* Developer Simulation Panel */}
-      <div style={{ position: 'absolute', top: 10, left: 10, zIndex: 9999, backgroundColor: 'rgba(0,0,0,0.8)', padding: '10px', borderRadius: '8px', border: '1px solid #333' }}>
-        <div style={{ color: '#FBBF24', fontSize: '10px', fontWeight: 'bold', marginBottom: '5px', textTransform: 'uppercase' }}>Test Mode / Dev Simulation</div>
-        <div style={{ display: 'flex', gap: '5px' }}>
-          {['GOOD', 'MEDIUM', 'VERY_LOW', 'OFFLINE'].map(state => (
-            <button
-              key={state}
-              type="button"
-              onClick={() => clinicalQoSController.setSimulatedState(state)}
-              style={{
-                backgroundColor: networkQuality === state ? '#6D28D9' : '#333',
-                color: 'white', border: 'none', padding: '4px 8px', fontSize: '10px', borderRadius: '4px', cursor: 'pointer'
-              }}
-            >
-              {state}
-            </button>
-          ))}
-        </div>
+      {/* Developer Simulation Panel (Collapsible & Non-blocking) */}
+      <div style={styles.devSimWrapper}>
+        {showDevSim ? (
+          <div style={styles.devSimExpanded}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '4px' }}>
+              <span style={{ color: '#FBBF24', fontSize: '9px', fontWeight: 'bold', textTransform: 'uppercase' }}>
+                Test Mode / QoS Sim
+              </span>
+              <button
+                type="button"
+                onClick={() => setShowDevSim(false)}
+                style={{ background: 'none', border: 'none', color: '#94A3B8', cursor: 'pointer', padding: '1px 3px' }}
+                aria-label="Close Dev Sim"
+              >
+                <X size={11} />
+              </button>
+            </div>
+            <div style={{ display: 'flex', gap: '4px' }}>
+              {['GOOD', 'MEDIUM', 'VERY_LOW', 'OFFLINE'].map((state) => (
+                <button
+                  key={state}
+                  type="button"
+                  onClick={() => clinicalQoSController.setSimulatedState(state)}
+                  style={{
+                    backgroundColor: networkQuality === state ? '#6D28D9' : '#334155',
+                    color: 'white',
+                    border: 'none',
+                    padding: '3px 6px',
+                    fontSize: '9px',
+                    borderRadius: '4px',
+                    cursor: 'pointer',
+                  }}
+                >
+                  {state}
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setShowDevSim(true)}
+            style={styles.devSimCollapsedBtn}
+            title="Click to toggle Test Simulation mode"
+          >
+            🧪 QoS: {networkQuality}
+          </button>
+        )}
       </div>
 
       {/* Header Bar */}
@@ -1174,206 +1368,274 @@ export const TeleconsultationRoom = ({ appointment, onLeaveRoom }) => {
             )}
           </div>
 
-          <button type="button" onClick={onLeaveRoom} style={styles.returnBtn}>
-            <span>{t('teleconsult.returnHome')}</span>
+          <button
+            type="button"
+            onClick={onLeaveRoom}
+            style={styles.returnBtn}
+          >
+            {t('teleconsult.leaveRoom') || 'Return to Dashboard'}
           </button>
         </div>
       ) : (
         <div style={styles.videoStage}>
-          {/* Live Voice AI Controller Bar */}
+          {/* Live Voice AI Controller Bar (Collapsible & Non-blocking) */}
           {isLiveTranslationActive && (
-            <div style={styles.liveVoiceControlBar}>
-              {/* Mic Status & Live Audio Level Meter */}
-              <div
-                style={styles.micStatusBadge}
-                onClick={() => {
-                  try {
-                    speechRecognizerRef.current?.start();
-                  } catch (e) {}
-                }}
-                title="Click to restart or verify microphone listening"
-              >
-                <div style={{
-                  ...styles.pulsingDot,
-                  backgroundColor: speechStatus === 'listening' ? '#10B981' : speechStatus === 'error' ? '#EF4444' : '#F59E0B',
-                  boxShadow: speechStatus === 'listening' ? '0 0 8px #10B981' : 'none',
-                }} />
-                <span style={{ fontSize: '0.72rem', fontWeight: '800', color: '#FFFFFF' }}>
-                  {speechStatus === 'listening'
-                    ? '🟢 Mic Live'
-                    : speechStatus === 'error'
-                    ? '⚠️ Enable Mic'
-                    : '🟡 AI Ready'}
-                </span>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', flexShrink: 0 }}>
+              {/* Compact Non-Blocking Summary Ribbon */}
+              <div style={styles.liveVoiceSummaryBar}>
+                {/* Mic Status & Live Audio Level Meter */}
+                <div
+                  style={styles.micStatusBadge}
+                  onClick={() => {
+                    try {
+                      speechRecognizerRef.current?.start();
+                    } catch (e) {}
+                  }}
+                  title="Click to restart or verify microphone listening"
+                >
+                  <div
+                    style={{
+                      ...styles.pulsingDot,
+                      backgroundColor:
+                        speechStatus === 'listening' ? '#10B981' : speechStatus === 'error' ? '#EF4444' : '#F59E0B',
+                      boxShadow: speechStatus === 'listening' ? '0 0 8px #10B981' : 'none',
+                    }}
+                  />
+                  <span style={{ fontSize: '0.72rem', fontWeight: '800', color: '#FFFFFF' }}>
+                    {speechStatus === 'listening'
+                      ? '🟢 Mic Live'
+                      : speechStatus === 'error'
+                      ? '⚠️ Enable Mic'
+                      : '🟡 AI Ready'}
+                  </span>
 
-                {/* Audio Waveform Meter */}
-                <div style={styles.audioWaveformContainer}>
-                  {[15, 45, 80, 55, 30].map((h, i) => (
-                    <div
-                      key={i}
-                      style={{
-                        ...styles.audioWaveformBar,
-                        height: `${Math.max(4, Math.min(18, (micVolume / 100) * h * 1.5))}px`,
-                        backgroundColor: micVolume > 10 ? '#34D399' : '#64748B',
-                      }}
-                    />
-                  ))}
+                  {/* Audio Waveform Meter */}
+                  <div style={styles.audioWaveformContainer}>
+                    {[15, 45, 80, 55, 30].map((h, i) => (
+                      <div
+                        key={i}
+                        style={{
+                          ...styles.audioWaveformBar,
+                          height: `${Math.max(4, Math.min(16, (micVolume / 100) * h * 1.5))}px`,
+                          backgroundColor: micVolume > 10 ? '#34D399' : '#64748B',
+                        }}
+                      />
+                    ))}
+                  </div>
                 </div>
+
+                {/* Active Languages Indicator Chip */}
+                <div style={styles.summaryLangChip}>
+                  <span style={{ color: '#C4B5FD', fontWeight: '700' }}>
+                    🗣️ {sourceLang.toUpperCase()} ➔ 🎧 {targetLang.toUpperCase()}
+                  </span>
+                  <span style={{ color: speakVoiceover ? '#34D399' : '#94A3B8', fontSize: '0.66rem', display: 'flex', alignItems: 'center', gap: '3px' }}>
+                    {speakVoiceover ? <Volume2 size={11} /> : <VolumeX size={11} />}
+                    {speakVoiceover ? 'Voice ON' : 'Voice OFF'}
+                  </span>
+                </div>
+
+                {/* Toggle Expansion Button */}
+                <button
+                  type="button"
+                  onClick={() => setIsTranslationExpanded((prev) => !prev)}
+                  style={{
+                    ...styles.toggleTranslationPanelBtn,
+                    backgroundColor: isTranslationExpanded ? '#6D28D9' : 'rgba(255,255,255,0.14)',
+                    color: '#FFFFFF',
+                  }}
+                  title="Toggle translation controls & language selection"
+                  aria-label="Toggle Translation Panel"
+                >
+                  <Languages size={13} color="#FFFFFF" />
+                  <span>{isTranslationExpanded ? 'Close ▲' : 'Languages ▼'}</span>
+                </button>
               </div>
 
-              {/* 1. Spoken Language Selector (What I Speak) */}
-              <div style={styles.langPillGroup}>
-                <span style={styles.langGroupLabel}>🗣️ I Speak:</span>
-                {[
-                  { id: 'en', label: 'English' },
-                  { id: 'hi', label: 'हिन्दी' },
-                  { id: 'ta', label: 'தமிழ்' },
-                  { id: 'te', label: 'తెలుగు' },
-                  { id: 'kn', label: 'ಕನ್ನಡ' },
-                  { id: 'ml', label: 'മലയാളം' },
-                ].map((l) => (
-                  <button
-                    key={l.id}
-                    type="button"
-                    onClick={() => setSourceLang(l.id)}
-                    style={{
-                      ...styles.langPillBtn,
-                      backgroundColor: sourceLang === l.id ? '#6D28D9' : 'rgba(255,255,255,0.12)',
-                      color: '#FFFFFF',
-                      borderColor: sourceLang === l.id ? '#C4B5FD' : 'rgba(255,255,255,0.1)',
-                      boxShadow: sourceLang === l.id ? '0 0 10px rgba(109, 40, 217, 0.6)' : 'none',
-                    }}
-                    title={`You speak in ${l.label}`}
-                  >
-                    {l.label}
-                  </button>
-                ))}
-              </div>
+              {/* Dedicated Non-Blocking Language Selection & Voice Controller Panel */}
+              {isTranslationExpanded && (
+                <div style={styles.translationExpandedCard}>
+                  <div style={styles.translationExpandedHeader}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <Languages size={15} color="#A78BFA" />
+                      <strong style={{ fontSize: '0.78rem', color: '#F8FAFC' }}>
+                        Live AI Speech Translation Settings
+                      </strong>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setIsTranslationExpanded(false)}
+                      style={styles.collapseBarBtn}
+                      aria-label="Collapse translation panel"
+                    >
+                      <X size={15} color="#CBD5E1" />
+                    </button>
+                  </div>
 
-              {/* 2. Listening / Subtitle Language Selector (What I Hear / Read) */}
-              <div style={styles.langPillGroup}>
-                <span style={{ ...styles.langGroupLabel, color: '#34D399' }}>🎧 Listen in:</span>
-                {[
-                  { id: 'ta', label: 'தமிழ்' },
-                  { id: 'en', label: 'English' },
-                  { id: 'hi', label: 'हिन्दी' },
-                  { id: 'te', label: 'తెలుగు' },
-                  { id: 'kn', label: 'ಕನ್ನಡ' },
-                  { id: 'ml', label: 'മലയാളം' },
-                ].map((l) => (
-                  <button
-                    key={l.id}
-                    type="button"
-                    onClick={() => {
-                      setTargetLang(l.id);
-                      if (liveCaptions && liveCaptions.original) {
-                        const newTrans = liveTranslationService.translateTextSync(
-                          liveCaptions.original,
-                          liveCaptions.sourceLang || sourceLang,
-                          l.id
-                        );
-                        setLiveCaptions({
-                          ...liveCaptions,
-                          targetLang: l.id,
-                          translated: newTrans,
-                        });
-                        if (speakVoiceover) {
-                          liveTranslationService.speakTranslatedAudio(newTrans, l.id);
+                  {/* 1. Spoken Language Selector (Horizontal Scrollable Tray) */}
+                  <div style={styles.langPillRow}>
+                    <span style={styles.langGroupLabel}>🗣️ I Speak:</span>
+                    <div style={styles.langScrollTray}>
+                      {[
+                        { id: 'en', label: 'English' },
+                        { id: 'hi', label: 'हिन्दी' },
+                        { id: 'ta', label: 'தமிழ்' },
+                        { id: 'te', label: 'తెలుగు' },
+                        { id: 'kn', label: 'ಕನ್ನಡ' },
+                        { id: 'ml', label: 'മലയാളം' },
+                      ].map((l) => (
+                        <button
+                          key={l.id}
+                          type="button"
+                          onClick={() => setSourceLang(l.id)}
+                          style={{
+                            ...styles.langPillBtn,
+                            backgroundColor: sourceLang === l.id ? '#6D28D9' : 'rgba(255,255,255,0.12)',
+                            color: '#FFFFFF',
+                            borderColor: sourceLang === l.id ? '#C4B5FD' : 'rgba(255,255,255,0.1)',
+                            boxShadow: sourceLang === l.id ? '0 0 8px rgba(109, 40, 217, 0.6)' : 'none',
+                          }}
+                          title={`You speak in ${l.label}`}
+                        >
+                          {l.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* 2. Listening / Subtitle Language Selector (Horizontal Scrollable Tray) */}
+                  <div style={styles.langPillRow}>
+                    <span style={{ ...styles.langGroupLabel, color: '#34D399' }}>🎧 Listen in:</span>
+                    <div style={styles.langScrollTray}>
+                      {[
+                        { id: 'ta', label: 'தமிழ்' },
+                        { id: 'en', label: 'English' },
+                        { id: 'hi', label: 'हिन्दी' },
+                        { id: 'te', label: 'తెలుగు' },
+                        { id: 'kn', label: 'ಕನ್ನಡ' },
+                        { id: 'ml', label: 'മലയാളം' },
+                      ].map((l) => (
+                        <button
+                          key={l.id}
+                          type="button"
+                          onClick={() => {
+                            setTargetLang(l.id);
+                            if (liveCaptions && liveCaptions.original) {
+                              const newTrans = liveTranslationService.translateTextSync(
+                                liveCaptions.original,
+                                liveCaptions.sourceLang || sourceLang,
+                                l.id
+                              );
+                              setLiveCaptions({
+                                ...liveCaptions,
+                                targetLang: l.id,
+                                translated: newTrans,
+                              });
+                              if (speakVoiceover) {
+                                liveTranslationService.speakTranslatedAudio(newTrans, l.id);
+                              }
+                            }
+                          }}
+                          style={{
+                            ...styles.langPillBtn,
+                            backgroundColor: targetLang === l.id ? '#059669' : 'rgba(255,255,255,0.12)',
+                            color: '#FFFFFF',
+                            borderColor: targetLang === l.id ? '#6EE7B7' : 'rgba(255,255,255,0.1)',
+                            boxShadow: targetLang === l.id ? '0 0 8px rgba(5, 150, 105, 0.6)' : 'none',
+                          }}
+                          title={`Translate incoming voice to ${l.label}`}
+                        >
+                          {l.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* 3. AI Voiceover Toggle & Quick Test Chips Row */}
+                  <div style={styles.translationControlsRow}>
+                    <button
+                      type="button"
+                      onClick={() => setSpeakVoiceover(!speakVoiceover)}
+                      style={{
+                        ...styles.voiceoverToggleBtn,
+                        backgroundColor: speakVoiceover ? 'rgba(5, 150, 105, 0.35)' : 'rgba(255,255,255,0.1)',
+                        borderColor: speakVoiceover ? '#34D399' : 'rgba(255,255,255,0.15)',
+                        color: speakVoiceover ? '#34D399' : '#94A3B8',
+                      }}
+                      title="Toggle AI voiceover speech out loud"
+                    >
+                      {speakVoiceover ? <Volume2 size={13} color="#34D399" /> : <VolumeX size={13} color="#94A3B8" />}
+                      <span>{speakVoiceover ? 'Voice ON' : 'Voice OFF'}</span>
+                    </button>
+
+                    <div style={styles.quickVoiceChips}>
+                      <span style={styles.langGroupLabel}>Quick Test:</span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          broadcastCaption(
+                            sourceLang === 'hi'
+                              ? 'नमस्ते डॉक्टर, मुझे तेज बुखार और सिरदर्द है।'
+                              : sourceLang === 'ta'
+                              ? 'வணக்கம் டாக்டர், எனக்கு காய்ச்சல் மற்றும் தலைவலி உள்ளது.'
+                              : sourceLang === 'te'
+                              ? 'నమస్కారం డాక్టర్, నాకు తీవ్రమైన జ్వరం మరియు తలనొప్పి ఉంది.'
+                              : sourceLang === 'kn'
+                              ? 'ನಮಸ್ಕಾರ ವೈದ್ಯರೇ, ನನಗೆ ತೀವ್ರ ಜ್ವರ ಮತ್ತು ತಲೆನೋವು ಇದೆ.'
+                              : sourceLang === 'ml'
+                              ? 'നമസ്കാരം ഡോക്ടർ, എനിക്ക് കടുത്ത പനിയും തലവേദനയും ഉണ്ട്.'
+                              : 'Hello Doctor, I have high fever and severe headache.'
+                          )
                         }
-                      }
-                    }}
-                    style={{
-                      ...styles.langPillBtn,
-                      backgroundColor: targetLang === l.id ? '#059669' : 'rgba(255,255,255,0.12)',
-                      color: '#FFFFFF',
-                      borderColor: targetLang === l.id ? '#6EE7B7' : 'rgba(255,255,255,0.1)',
-                      boxShadow: targetLang === l.id ? '0 0 10px rgba(5, 150, 105, 0.6)' : 'none',
-                    }}
-                    title={`Translate incoming voice to ${l.label}`}
-                  >
-                    {l.label}
-                  </button>
-                ))}
-              </div>
-
-              {/* AI Voiceover Toggle */}
-              <button
-                type="button"
-                onClick={() => setSpeakVoiceover(!speakVoiceover)}
-                style={{
-                  ...styles.voiceoverToggleBtn,
-                  backgroundColor: speakVoiceover ? 'rgba(5, 150, 105, 0.35)' : 'rgba(255,255,255,0.1)',
-                  borderColor: speakVoiceover ? '#34D399' : 'rgba(255,255,255,0.15)',
-                  color: speakVoiceover ? '#34D399' : '#94A3B8',
-                }}
-                title="Toggle AI voiceover speech out loud"
-              >
-                {speakVoiceover ? <Volume2 size={13} color="#34D399" /> : <VolumeX size={13} color="#94A3B8" />}
-                <span>{speakVoiceover ? 'Voice ON' : 'Voice OFF'}</span>
-              </button>
-
-              {/* Quick Test Voice Chips */}
-              <div style={styles.quickVoiceChips}>
-                <span style={styles.langGroupLabel}>Quick Test:</span>
-                <button
-                  type="button"
-                  onClick={() => broadcastCaption(
-                    sourceLang === 'hi'
-                      ? 'नमस्ते डॉक्टर, मुझे तेज बुखार और सिरदर्द है।'
-                      : sourceLang === 'ta'
-                      ? 'வணக்கம் டாக்டர், எனக்கு காய்ச்சல் மற்றும் தலைவலி உள்ளது.'
-                      : sourceLang === 'te'
-                      ? 'నమస్కారం డాక్టర్, నాకు తీవ్రమైన జ్వరం మరియు తలనొప్పి ఉంది.'
-                      : sourceLang === 'kn'
-                      ? 'ನಮಸ್ಕಾರ ವೈದ್ಯರೇ, ನನಗೆ ತೀವ್ರ ಜ್ವರ ಮತ್ತು ತಲೆನೋವು ಇದೆ.'
-                      : sourceLang === 'ml'
-                      ? 'നമസ്കാരം ഡോക്ടർ, എനിക്ക് കടുത്ത പനിയും തലവേദനയും ഉണ്ട്.'
-                      : 'Hello Doctor, I have high fever and severe headache.'
-                  )}
-                  style={styles.quickSpeechTestBtn}
-                >
-                  🎙️ {sourceLang === 'ta'
-                    ? '"காய்ச்சல் உள்ளது"'
-                    : sourceLang === 'hi'
-                    ? '"तेज बुखार है"'
-                    : sourceLang === 'te'
-                    ? '"జ్వరం ఉంది"'
-                    : sourceLang === 'kn'
-                    ? '"ಜ್ವರ ಇದೆ"'
-                    : sourceLang === 'ml'
-                    ? '"കടുത്ത പനിയുണ്ട്"'
-                    : '"I have fever"'}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => broadcastCaption(
-                    sourceLang === 'hi'
-                      ? 'भोजन के बाद यह दवा दिन में दो बार लें।'
-                      : sourceLang === 'ta'
-                      ? 'உணவுக்குப் பிறகு இந்த மருந்தை தினமும் இரண்டு முறை உட்கொள்ளவும்.'
-                      : sourceLang === 'te'
-                      ? 'భోజనం తర్వాత ఈ మందును రోజుకు రెండుసార్లు తీసుకోండి.'
-                      : sourceLang === 'kn'
-                      ? 'ಊಟದ ನಂತರ ಈ ಔಷಧಿಯನ್ನು ದಿನಕ್ಕೆ ಎರಡು ಬಾರಿ ತೆಗೆದುಕೊಳ್ಳಿ.'
-                      : sourceLang === 'ml'
-                      ? 'ഭക്ഷണത്തിന് ശേഷം ഈ മരുന്ന് ദിവസവും രണ്ട് നേരം കഴിക്കുക.'
-                      : 'Take this medicine twice a day after meals.'
-                  )}
-                  style={styles.quickSpeechTestBtn}
-                >
-                  🎙️ {sourceLang === 'ta'
-                    ? '"மருந்து உட்கொள்ளவும்"'
-                    : sourceLang === 'hi'
-                    ? '"दवा दो बार लें"'
-                    : sourceLang === 'te'
-                    ? '"మందు తీసుకోండి"'
-                    : sourceLang === 'kn'
-                    ? '"ಔಷಧಿ ತೆಗೆದುಕೊಳ್ಳಿ"'
-                    : sourceLang === 'ml'
-                    ? '"മരുന്ന് കഴിക്കുക"'
-                    : '"Take medicine"'}
-                </button>
-              </div>
+                        style={styles.quickSpeechTestBtn}
+                      >
+                        🎙️ {sourceLang === 'ta'
+                          ? '"காய்ச்சல் உள்ளது"'
+                          : sourceLang === 'hi'
+                          ? '"तेज बुखार है"'
+                          : sourceLang === 'te'
+                          ? '"జ్వరం ఉంది"'
+                          : sourceLang === 'kn'
+                          ? '"ಜ್ವರ ಇದೆ"'
+                          : sourceLang === 'ml'
+                          ? '"കടുത്ത പനിയുണ്ട്"'
+                          : '"I have fever"'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          broadcastCaption(
+                            sourceLang === 'hi'
+                              ? 'भोजन के बाद यह दवा दिन में दो बार लें।'
+                              : sourceLang === 'ta'
+                              ? 'உணவுக்குப் பிறகு இந்த மருந்தை தினமும் இரண்டு முறை உட்கொள்ளவும்.'
+                              : sourceLang === 'te'
+                              ? 'భోజనం తర్వాత ఈ మందును రోజుకు రెండుసార్లు తీసుకోండి.'
+                              : sourceLang === 'kn'
+                              ? 'ಊಟದ ನಂತರ ಈ ಔಷಧಿಯನ್ನು ದಿನಕ್ಕೆ ಎರಡು ಬಾರಿ ತೆಗೆದುಕೊಳ್ಳಿ.'
+                              : sourceLang === 'ml'
+                              ? 'ഭക്ഷണത്തിന് ശേഷം ഈ മരുന്ന് ദിവസവും രണ്ട് നേരം കഴിക്കുക.'
+                              : 'Take this medicine twice a day after meals.'
+                          )
+                        }
+                        style={styles.quickSpeechTestBtn}
+                      >
+                        🎙️ {sourceLang === 'ta'
+                          ? '"மருந்து உட்கொள்ளவும்"'
+                          : sourceLang === 'hi'
+                          ? '"दवा दो बार लें"'
+                          : sourceLang === 'te'
+                          ? '"మందు తీసుకోండి"'
+                          : sourceLang === 'kn'
+                          ? '"ಔಷಧಿ ತೆಗೆದುಕೊಳ್ಳಿ"'
+                          : sourceLang === 'ml'
+                          ? '"മരുന്ന് കഴിക്കുക"'
+                          : '"Take medicine"'}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
@@ -1427,11 +1689,32 @@ export const TeleconsultationRoom = ({ appointment, onLeaveRoom }) => {
                   <span
                     style={{
                       ...styles.livePeerStatus,
-                      color: isPeerConnected ? '#34D399' : '#FBBF24',
+                      color: isPeerConnected ? '#34D399' : connectionStatus === 'failed' ? '#EF4444' : '#FBBF24',
                     }}
                   >
-                    {isPeerConnected ? '🟢 Live WebRTC Peer Connected' : '🟡 Waiting for peer to enter room...'}
+                    {isPeerConnected
+                      ? (isRemoteVideoMuted ? '🟢 Live Voice Connected (Camera Off)' : '🟢 Live WebRTC Peer Connected')
+                      : connectionStatus === 'connected'
+                      ? '🟢 Live WebRTC Peer Connected'
+                      : connectionStatus === 'connecting'
+                      ? `🟡 Connecting with ${remotePeerInfo?.userName || peerName}...`
+                      : connectionStatus === 'failed'
+                      ? '🔴 Connection Failed'
+                      : connectionStatus === 'disconnected'
+                      ? '🟠 Disconnected from peer'
+                      : remotePeerInfo
+                      ? `🟡 ${remotePeerInfo.userName || peerName} in room, connecting...`
+                      : '🟡 Waiting for peer to enter room...'}
                   </span>
+                  {(connectionStatus === 'failed' || connectionStatus === 'disconnected') && (
+                    <button
+                      type="button"
+                      onClick={handleManualReconnect}
+                      style={styles.retryConnectionBtn}
+                    >
+                      🔄 Retry Connection
+                    </button>
+                  )}
                   {isRemoteAudioMuted && (
                     <span style={styles.remoteMutedTag}>Peer Microphone Muted</span>
                   )}
@@ -1495,7 +1778,16 @@ export const TeleconsultationRoom = ({ appointment, onLeaveRoom }) => {
             )}
 
             {/* Local PiP Video Preview Overlay */}
-            <div style={styles.localPipContainer}>
+            <div
+              style={{
+                ...styles.localPipContainer,
+                ...(pipPosition === 'top'
+                  ? { top: '12px', bottom: 'auto', right: '12px' }
+                  : { bottom: '12px', top: 'auto', right: '12px' }),
+              }}
+              onClick={() => setPipPosition((prev) => (prev === 'top' ? 'bottom' : 'top'))}
+              title="Click to toggle preview position"
+            >
               {isVideoMuted ? (
                 <div style={styles.pipMutedBackdrop}>
                   <VideoOff size={20} color="#94A3B8" />
@@ -1887,6 +2179,7 @@ export const TeleconsultationRoom = ({ appointment, onLeaveRoom }) => {
           <div style={styles.controlsBar}>
             {/* Audio Toggle */}
             <button
+              id="btn-call-mic"
               type="button"
               onClick={toggleAudio}
               style={{
@@ -1902,6 +2195,7 @@ export const TeleconsultationRoom = ({ appointment, onLeaveRoom }) => {
 
             {/* Video Toggle */}
             <button
+              id="btn-call-video"
               type="button"
               onClick={toggleVideo}
               style={{
@@ -1917,6 +2211,7 @@ export const TeleconsultationRoom = ({ appointment, onLeaveRoom }) => {
 
             {/* Live AI Audio Translation Toggle */}
             <button
+              id="btn-call-translate"
               type="button"
               onClick={handleToggleTranslationSettings}
               style={{
@@ -1933,6 +2228,7 @@ export const TeleconsultationRoom = ({ appointment, onLeaveRoom }) => {
 
             {/* Prescription Drawer Toggle */}
             <button
+              id="btn-call-rx"
               type="button"
               onClick={showPrescriptionDrawer ? () => setShowPrescriptionDrawer(false) : handleOpenPrescription}
               style={{
@@ -1948,6 +2244,7 @@ export const TeleconsultationRoom = ({ appointment, onLeaveRoom }) => {
 
             {/* Chat Toggle with Unread Badge */}
             <button
+              id="btn-call-chat"
               type="button"
               onClick={showChat ? () => setShowChat(false) : handleOpenChat}
               style={{
@@ -1984,6 +2281,7 @@ export const TeleconsultationRoom = ({ appointment, onLeaveRoom }) => {
 
             {/* End Call Button (Synchronously terminates for both parties) */}
             <button
+              id="btn-call-end"
               type="button"
               onClick={handleEndCall}
               style={styles.endCallCircleBtn}
@@ -2009,6 +2307,123 @@ export const TeleconsultationRoom = ({ appointment, onLeaveRoom }) => {
 };
 
 const styles = {
+  devSimWrapper: {
+    display: 'flex',
+    justifyContent: 'flex-end',
+    marginBottom: '-4px',
+  },
+  devSimCollapsedBtn: {
+    backgroundColor: 'rgba(30, 41, 59, 0.7)',
+    color: '#94A3B8',
+    border: '1px solid rgba(255, 255, 255, 0.1)',
+    borderRadius: '6px',
+    padding: '2px 8px',
+    fontSize: '10px',
+    fontWeight: '700',
+    cursor: 'pointer',
+    display: 'inline-flex',
+    alignItems: 'center',
+  },
+  devSimExpanded: {
+    backgroundColor: '#1E293B',
+    border: '1px solid #475569',
+    borderRadius: '8px',
+    padding: '6px 10px',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '4px',
+    boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
+  },
+  liveVoiceSummaryBar: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: '8px',
+    padding: '6px 12px',
+    borderRadius: '14px',
+    backgroundColor: 'rgba(15, 23, 42, 0.9)',
+    backdropFilter: 'blur(10px)',
+    border: '1px solid rgba(139, 92, 246, 0.35)',
+    boxShadow: '0 2px 10px rgba(0, 0, 0, 0.2)',
+  },
+  summaryLangChip: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+    fontSize: '0.74rem',
+  },
+  toggleTranslationPanelBtn: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '5px',
+    padding: '4px 10px',
+    borderRadius: '8px',
+    border: '1px solid rgba(255, 255, 255, 0.2)',
+    fontSize: '0.7rem',
+    fontWeight: '800',
+    cursor: 'pointer',
+    transition: 'all 0.15s ease',
+  },
+  translationExpandedCard: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '8px',
+    padding: '10px 12px',
+    borderRadius: '14px',
+    backgroundColor: 'rgba(15, 23, 42, 0.95)',
+    backdropFilter: 'blur(12px)',
+    border: '1px solid rgba(139, 92, 246, 0.4)',
+    boxShadow: '0 4px 16px rgba(0, 0, 0, 0.3)',
+  },
+  translationExpandedHeader: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  collapseBarBtn: {
+    background: 'none',
+    border: 'none',
+    cursor: 'pointer',
+    padding: '2px',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  langPillRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+  },
+  langScrollTray: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '6px',
+    overflowX: 'auto',
+    paddingBottom: '2px',
+    scrollbarWidth: 'none',
+  },
+  translationControlsRow: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: '8px',
+    flexWrap: 'wrap',
+    paddingTop: '4px',
+    borderTop: '1px solid rgba(255, 255, 255, 0.08)',
+  },
+  retryConnectionBtn: {
+    marginTop: '6px',
+    padding: '4px 12px',
+    borderRadius: '8px',
+    backgroundColor: '#6D28D9',
+    color: '#FFFFFF',
+    border: 'none',
+    fontSize: '0.74rem',
+    fontWeight: '700',
+    cursor: 'pointer',
+    boxShadow: '0 2px 6px rgba(109, 40, 217, 0.4)',
+  },
+
   roomContainer: {
     display: 'flex',
     flexDirection: 'column',
@@ -2126,7 +2541,8 @@ const styles = {
   remoteVideoContainer: {
     position: 'relative',
     width: '100%',
-    height: '380px',
+    height: 'clamp(280px, 45vh, 420px)',
+    minHeight: '260px',
     backgroundColor: '#0F172A',
     borderRadius: '20px',
     overflow: 'hidden',
@@ -2205,7 +2621,9 @@ const styles = {
     position: 'absolute',
     bottom: '14px',
     left: '14px',
-    right: '130px',
+    right: '14px',
+    maxHeight: '110px',
+    overflowY: 'auto',
     backgroundColor: 'rgba(15, 23, 42, 0.92)',
     backdropFilter: 'blur(10px)',
     border: '1.5px solid rgba(139, 92, 246, 0.5)',

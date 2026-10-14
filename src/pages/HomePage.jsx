@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import TopHeader from '../components/TopHeader';
 import HomeRouter from '../components/HomeRouter';
 import ProfilePage from './ProfilePage';
@@ -20,6 +20,36 @@ export const HomePage = () => {
   const [activeSubView, setActiveSubView] = useState(null);
   const [autoVoiceMode, setAutoVoiceMode] = useState(false);
   const [activeAppointment, setActiveAppointment] = useState(null);
+
+  useEffect(() => {
+    const checkRoute = () => {
+      const searchParams = new URLSearchParams(window.location.search);
+      const hashStr = window.location.hash || '';
+      const hashQueryIndex = hashStr.indexOf('?');
+      const hashParams = hashQueryIndex !== -1 ? new URLSearchParams(hashStr.slice(hashQueryIndex)) : new URLSearchParams();
+      const roomParam = searchParams.get('room') || hashParams.get('room') || (hashStr.includes('room-') ? 'room-apt-001' : null);
+      const viewParam = searchParams.get('view') || hashParams.get('view') || (hashStr.toLowerCase().includes('teleconsult') ? 'teleconsult-room' : null);
+
+      if (roomParam || viewParam === 'teleconsult-room') {
+        setActiveAppointment((prev) => prev || {
+          _id: searchParams.get('aptId') || hashParams.get('aptId') || 'apt-001',
+          roomId: roomParam || 'room-apt-001',
+          patientName: 'Kavita Devi',
+          doctorName: 'Dr. Ananya Sharma',
+          tokenNumber: 'TK-08',
+        });
+        setActiveSubView('teleconsult-room');
+      }
+    };
+
+    checkRoute();
+    window.addEventListener('hashchange', checkRoute);
+    window.addEventListener('popstate', checkRoute);
+    return () => {
+      window.removeEventListener('hashchange', checkRoute);
+      window.removeEventListener('popstate', checkRoute);
+    };
+  }, []);
 
   const handleTabChange = (newTab) => {
     setActiveSubView(null);
@@ -62,11 +92,18 @@ export const HomePage = () => {
 
   return (
     <div className="app-container">
-      {/* 1. Top Header */}
-      <TopHeader />
+      {/* 1. Top Header (Hidden during active teleconsultation to maximize screen area) */}
+      {activeSubView !== 'teleconsult-room' && <TopHeader />}
 
-      {/* Main Scrollable Content */}
-      <main className="app-content">
+      {/* Main Content */}
+      <main
+        className="app-content"
+        style={
+          activeSubView === 'teleconsult-room'
+            ? { padding: '10px 12px 12px 12px', gap: '8px', overflowY: 'auto' }
+            : undefined
+        }
+      >
         {activeSubView === 'symptom-checker' ? (
           <SymptomCheckerPage
             onBack={() => {
@@ -146,8 +183,10 @@ export const HomePage = () => {
         )}
       </main>
 
-      {/* Fixed Bottom Navigation Bar */}
-      <BottomNavBar activeTab={currentTab} onTabChange={handleTabChange} />
+      {/* Fixed Bottom Navigation Bar (Hidden during active teleconsultation so call controls remain prominent) */}
+      {activeSubView !== 'teleconsult-room' && (
+        <BottomNavBar activeTab={currentTab} onTabChange={handleTabChange} />
+      )}
     </div>
   );
 };
