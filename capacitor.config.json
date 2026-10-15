@@ -1,0 +1,9 @@
+{
+  "appId": "com.careconnect.app",
+  "appName": "CareConnect",
+  "webDir": "dist",
+  "server": {
+    "cleartext": true,
+    "androidScheme": "https"
+  }
+}

@@ -1,6 +1,6 @@
 import io from 'socket.io-client';
 
-const SERVER_URL = 'http://localhost:5000';
+const SERVER_URL = process.env.SERVER_URL || 'http://localhost:5001';
 const ROOM_ID = 'test-room-webrtc-999';
 
 console.log('--- Starting WebRTC Signaling & Room Membership Verification ---');
